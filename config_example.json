@@ -1,0 +1,36 @@
+{
+  "experiment_name": "example_experiment",
+  "circuit": {
+    "code_type": "surface_code",
+    "distance": 5,
+    "rounds": 5,
+    "noise_level": 0.001
+  },
+  "sampling": {
+    "n_shots": 100000
+  },
+  "methods": {
+    "noise_calibration": {
+      "enabled": true,
+      "num_workers": 8
+    },
+    "correlation": {
+      "enabled": true,
+      "use_numerical": true,
+      "num_workers": 16
+    },
+    "rl_based": {
+      "enabled": false,
+      "learning_rate": 0.001,
+      "batch_size": 32,
+      "epochs": 50,
+      "num_workers": 8
+    }
+  },
+  "evaluation": {
+    "ground_truth": "dem",
+    "evaluators": ["distribution_distance", "decoder_ler"],
+    "decoders": ["pymatching", "pymatching_corr"]
+  }
+}
+
