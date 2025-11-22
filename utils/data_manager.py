@@ -42,6 +42,15 @@ class DataManager:
         with open(circuit_path, 'w') as f:
             f.write(str(circuit))
         
+        # 保存ground truth DEM（用于评测时的真实值）
+        dem_path = os.path.join(exp_dir, "ground_truth.dem")
+        dem = circuit.detector_error_model(
+            decompose_errors=True,
+            approximate_disjoint_errors=True
+        )
+        with open(dem_path, 'w') as f:
+            f.write(str(dem))
+        
         # 保存采样数据
         data_path = os.path.join(exp_dir, "samples.npz")
         np.savez_compressed(data_path, 

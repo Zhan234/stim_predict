@@ -61,8 +61,12 @@ class RLBasedPredictor(BasePredictor):
         self.policy_mean = None
         self.policy_std = None
         
-        # 价值函数（简单的线性近似）
-        self.value_weights = None
+        # 旧策略参数（用于计算importance ratio，PPO算法核心）
+        self.old_policy_mean = None
+        self.old_policy_std = None
+        
+        # Baseline（对应论文中的ba，每个agent的baseline）
+        self.baseline = None
         
         # Tanner图
         self.tanner_graph = None
@@ -109,8 +113,13 @@ class RLBasedPredictor(BasePredictor):
         self.policy_mean = np.log(init_probs)  # 在对数空间中优化
         self.policy_std = np.ones(n_params) * 0.5  # 初始标准差
         
-        # 初始化价值函数权重
-        self.value_weights = np.zeros(n_params + 1)  # +1 for bias
+        # 初始化旧策略（用于PPO importance ratio）
+        self.old_policy_mean = self.policy_mean.copy()
+        self.old_policy_std = self.policy_std.copy()
+        
+        # 初始化baseline（论文方程G9，每个agent一个baseline，但简化为全局）
+        # 在sensor场景下应该是每个sensor一个，这里简化为单一baseline
+        self.baseline = 0.0
         
         print(f"开始RL训练，共 {self.epochs} 轮，批次大小 {self.batch_size}")
         
@@ -149,25 +158,26 @@ class RLBasedPredictor(BasePredictor):
             rewards = np.array(rewards)
             lers = np.array(lers)
             
-            # 3. 计算优势函数（使用简单的baseline）
-            baseline = np.mean(rewards)
-            advantages = rewards - baseline
+            # 3. 计算优势函数（论文方程G10）
+            advantages = rewards - self.baseline
             
-            # 4. PPO策略更新
+            # 4. PPO策略更新（论文方程G23）
             policy_loss = self._update_policy_ppo(
                 log_probs_samples,
-                advantages,
-                rewards
+                advantages
             )
             
-            # 5. 更新价值函数
-            value_loss = self._update_value_function(log_probs_samples, rewards)
+            # 5. 更新baseline（论文方程G24）
+            baseline_loss = self._update_baseline(advantages)
+            
+            # 6. 更新baseline的值（使用指数移动平均）
+            self.baseline = 0.9 * self.baseline + 0.1 * np.mean(rewards)
             
             # 记录训练历史
             self.training_history['rewards'].append(np.mean(rewards))
             self.training_history['ler'].append(np.mean(lers))
             self.training_history['policy_loss'].append(policy_loss)
-            self.training_history['value_loss'].append(value_loss)
+            self.training_history['value_loss'].append(baseline_loss)
             
             # 打印进度
             if (epoch + 1) % 10 == 0:
@@ -301,95 +311,98 @@ class RLBasedPredictor(BasePredictor):
     
     def _update_policy_ppo(self,
                           log_probs_samples: np.ndarray,
-                          advantages: np.ndarray,
-                          rewards: np.ndarray) -> float:
+                          advantages: np.ndarray) -> float:
         """
-        使用PPO更新策略
+        使用PPO更新策略（基于论文Appendix G）
         
         Args:
             log_probs_samples: 采样的对数概率
             advantages: 优势函数值
-            rewards: 奖励值
             
         Returns:
             策略损失
         """
-        # 简化的PPO更新（使用梯度估计）
         n_samples = len(advantages)
         
-        # 计算策略梯度（REINFORCE with baseline）
-        # ∇_θ J ≈ E[A(s,a) * ∇_θ log π(a|s)]
+        # 计算importance ratio χ_θθ̃（论文方程G17和G20）
+        # log π_θ(p) = -0.5 * ((p - μ) / σ)^2 - log(σ) - 0.5*log(2π)
+        # log π_θ(p) - log π_θ̃(p) = -0.5*[(p-μ)/σ]^2 + 0.5*[(p-μ̃)/σ̃]^2 - log(σ/σ̃)
         
-        # 对每个参数计算梯度
+        log_ratios = []
+        for i in range(n_samples):
+            # 当前策略的对数概率
+            z_new = (log_probs_samples[i] - self.policy_mean) / (self.policy_std + 1e-10)
+            log_prob_new = -0.5 * np.sum(z_new ** 2) - np.sum(np.log(self.policy_std + 1e-10))
+            
+            # 旧策略的对数概率
+            z_old = (log_probs_samples[i] - self.old_policy_mean) / (self.old_policy_std + 1e-10)
+            log_prob_old = -0.5 * np.sum(z_old ** 2) - np.sum(np.log(self.old_policy_std + 1e-10))
+            
+            # Importance ratio
+            log_ratio = log_prob_new - log_prob_old
+            log_ratios.append(log_ratio)
+        
+        log_ratios = np.array(log_ratios)
+        importance_ratios = np.exp(np.clip(log_ratios, -10, 10))  # 防止数值溢出
+        
+        # PPO clipping（论文Table I：repetition code用0.15，surface code用0.4）
+        importance_ratios_clipped = np.clip(importance_ratios, 1.0 - self.clip_ratio, 1.0 + self.clip_ratio)
+        
+        # 标准化advantages（减少方差）
+        advantages_normalized = (advantages - np.mean(advantages)) / (np.std(advantages) + 1e-8)
+        
+        # 计算策略梯度（论文方程G21-G22）
+        # ∇_θ J ≈ E[α(p) · χ_θθ̃(p)]
         gradients = np.zeros_like(self.policy_mean)
         
         for i in range(n_samples):
-            # 标准化优势
-            normalized_advantage = advantages[i] / (np.std(advantages) + 1e-8)
+            # 使用clipped importance ratio
+            weighted_advantage = advantages_normalized[i] * importance_ratios_clipped[i]
             
-            # 梯度: A * (x - μ) / σ²
-            grad_sample = normalized_advantage * (log_probs_samples[i] - self.policy_mean) / (self.policy_std ** 2)
+            # 高斯策略的梯度: ∇_μ log π(p|μ,σ) = (p - μ) / σ²
+            grad_sample = weighted_advantage * (log_probs_samples[i] - self.policy_mean) / (self.policy_std ** 2 + 1e-10)
             gradients += grad_sample
         
         gradients /= n_samples
         
-        # 梯度裁剪
+        # 梯度裁剪（论文Table I: 0.1）
         grad_norm = np.linalg.norm(gradients)
         if grad_norm > self.max_grad_norm:
             gradients = gradients * self.max_grad_norm / grad_norm
+        
+        # 更新策略均值前，保存旧策略
+        self.old_policy_mean = self.policy_mean.copy()
+        self.old_policy_std = self.policy_std.copy()
         
         # 更新策略均值
         self.policy_mean += self.learning_rate * gradients
         
-        # 可选：更新标准差（简化版本，逐渐减小探索）
+        # 更新标准差（逐渐减小探索）
         self.policy_std = np.maximum(self.policy_std * 0.995, 0.1)
         
-        # 计算损失（用于监控）
-        policy_loss = -np.mean(advantages)
+        # 计算policy loss用于监控（论文方程G23）
+        # Lpolicy = -E[α(p) · χ_θθ̃(p)]
+        policy_loss = -np.mean(advantages_normalized * importance_ratios_clipped)
         
         return policy_loss
     
-    def _update_value_function(self,
-                              log_probs_samples: np.ndarray,
-                              rewards: np.ndarray) -> float:
+    def _update_baseline(self, advantages: np.ndarray) -> float:
         """
-        更新价值函数
+        更新baseline（论文方程G24）
         
         Args:
-            log_probs_samples: 采样的对数概率
-            rewards: 奖励值
+            advantages: 优势函数值
             
         Returns:
-            价值函数损失
+            baseline损失
         """
-        # 简单的线性价值函数: V(s) = w^T [s; 1]
-        # 构造特征矩阵
-        n_samples = len(rewards)
-        features = np.hstack([
-            log_probs_samples,
-            np.ones((n_samples, 1))
-        ])
+        # 论文方程G24: Lbaseline = E[||α(p)||²]
+        # 这个损失用于监控baseline的质量
+        # baseline越好，advantages的方差越小
         
-        # 预测价值
-        values = features @ self.value_weights
+        baseline_loss = np.mean(advantages ** 2)
         
-        # 计算TD误差
-        td_errors = rewards - values
-        
-        # 梯度下降更新
-        gradients = -2 * features.T @ td_errors / n_samples
-        
-        # 梯度裁剪
-        grad_norm = np.linalg.norm(gradients)
-        if grad_norm > self.max_grad_norm:
-            gradients = gradients * self.max_grad_norm / grad_norm
-        
-        self.value_weights -= self.learning_rate * gradients
-        
-        # 计算损失
-        value_loss = np.mean(td_errors ** 2)
-        
-        return value_loss
+        return baseline_loss
     
     def get_detector_error_model(self, circuit: stim.Circuit = None) -> stim.DetectorErrorModel:
         """

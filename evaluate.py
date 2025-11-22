@@ -14,7 +14,8 @@ def evaluate_predictions(
     methods: List[str],
     evaluators: List[str],
     ground_truth_method: str = 'dem',
-    decoders: Optional[List[str]] = None
+    decoders: Optional[List[str]] = None,
+    test_shots: int = 100000
 ):
     """
     评测多个预测方法的性能
@@ -25,32 +26,43 @@ def evaluate_predictions(
         evaluators: 要使用的评测器列表
         ground_truth_method: 真实值的来源 ('dem' 或某个方法名)
         decoders: 要测试的解码器列表（用于decoder_ler评测器）
+        test_shots: 测试集采样次数
     """
     print("=" * 80)
     print(f"开始评测实验: {experiment_name}")
     print(f"评测方法: {', '.join(methods)}")
     print(f"评测器: {', '.join(evaluators)}")
+    print(f"测试集大小: {test_shots} shots")
     print("=" * 80)
     
-    # 1. 加载训练数据
-    print("\n[1/3] 加载训练数据...")
+    # 1. 加载元数据和电路
+    print("\n[1/4] 加载实验配置...")
     data_manager = DataManager()
     
     try:
         training_data = data_manager.load_training_data(experiment_name)
         circuit = training_data['circuit']
-        detector_samples = training_data['detector_samples']
-        observables = training_data['observables']
         metadata = training_data['metadata']
         
-        print(f"训练数据加载完成")
+        print(f"实验配置加载完成")
         print(f"元数据: {metadata}")
     except Exception as e:
-        print(f"错误: 无法加载训练数据: {e}")
+        print(f"错误: 无法加载实验配置: {e}")
         return
     
-    # 2. 加载各方法的预测结果
-    print("\n[2/3] 加载预测结果...")
+    # 2. 采样新的测试数据（独立于训练数据）
+    print(f"\n[2/4] 采样测试数据 ({test_shots} shots)...")
+    print("注意: 测试数据独立于训练数据，确保评测结果的泛化性")
+    
+    sampler = circuit.compile_detector_sampler()
+    test_detector_samples, test_observables = sampler.sample(
+        shots=test_shots, 
+        separate_observables=True
+    )
+    print(f"测试数据采样完成，形状: detectors={test_detector_samples.shape}, observables={test_observables.shape}")
+    
+    # 3. 加载各方法的预测结果
+    print("\n[3/4] 加载预测结果...")
     predictions = {}
     
     for method_name in methods:
@@ -65,18 +77,29 @@ def evaluate_predictions(
         print("错误: 没有成功加载任何预测结果")
         return
     
-    # 获取真实值
+    # 获取真实值（从保存的ground truth DEM）
     print(f"\n获取真实值 (方法: {ground_truth_method})...")
     if ground_truth_method == 'dem':
-        # 从DEM获取真实概率
+        # 从保存的ground truth DEM文件加载
         import correlation
-        dem_origin = circuit.detector_error_model(
-            decompose_errors=True,
-            approximate_disjoint_errors=True
-        )
+        import os
+        
+        dem_path = os.path.join(data_manager.base_dir, experiment_name, "ground_truth.dem")
+        if os.path.exists(dem_path):
+            with open(dem_path, 'r') as f:
+                dem_origin = stim.DetectorErrorModel(f.read())
+            print(f"从保存的ground truth DEM加载")
+        else:
+            # 向后兼容：如果没有保存的DEM，从circuit重新生成
+            print("警告: 未找到保存的ground truth DEM，从电路重新生成")
+            dem_origin = circuit.detector_error_model(
+                decompose_errors=True,
+                approximate_disjoint_errors=True
+            )
+        
         tanner_graph = correlation.TannerGraph(dem_origin)
         ground_truth_probs = dict(tanner_graph.hyperedge_probs)
-        print(f"从DEM获取了 {len(ground_truth_probs)} 个超边的真实概率")
+        print(f"获取了 {len(ground_truth_probs)} 个超边的真实概率")
     else:
         # 使用某个方法的预测作为真实值
         if ground_truth_method in predictions:
@@ -86,8 +109,8 @@ def evaluate_predictions(
             print(f"错误: 指定的真实值方法 '{ground_truth_method}' 未找到")
             return
     
-    # 3. 运行评测
-    print("\n[3/3] 运行评测...")
+    # 4. 运行评测
+    print("\n[4/4] 运行评测...")
     
     for evaluator_name in evaluators:
         print(f"\n{'='*60}")
@@ -141,8 +164,8 @@ def evaluate_predictions(
                     predictions=predictions,
                     ground_truth_probs=ground_truth_probs,
                     circuit=circuit,
-                    detector_samples=detector_samples,
-                    observables=observables
+                    detector_samples=test_detector_samples,
+                    observables=test_observables
                 )
                 
                 # 打印结果
@@ -211,6 +234,8 @@ def main():
     parser.add_argument('--decoders', type=str, nargs='+',
                        default=['pymatching', 'pymatching_corr'],
                        help='要测试的解码器列表')
+    parser.add_argument('--test-shots', type=int, default=100000,
+                       help='测试集采样次数（默认100000）')
     
     args = parser.parse_args()
     
@@ -219,7 +244,8 @@ def main():
         methods=args.methods,
         evaluators=args.evaluators,
         ground_truth_method=args.ground_truth,
-        decoders=args.decoders
+        decoders=args.decoders,
+        test_shots=args.test_shots
     )
 
 

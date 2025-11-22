@@ -102,7 +102,7 @@ python train.py --experiment my_exp --code-type surface_code --distance 5 --roun
 #### 评测
 
 ```bash
-python evaluate.py --experiment my_exp --methods noise_calibration correlation --evaluators distribution_distance decoder_ler
+python evaluate.py --experiment my_exp --methods noise_calibration correlation --evaluators distribution_distance decoder_ler --test-shots 100000
 ```
 
 参数说明：
@@ -111,6 +111,7 @@ python evaluate.py --experiment my_exp --methods noise_calibration correlation -
 - `--evaluators`: 要使用的评测器（distribution_distance, decoder_ler）
 - `--ground-truth`: 真实值来源（默认为'dem'）
 - `--decoders`: 要测试的解码器列表（用于decoder_ler评测器）
+- `--test-shots`: 测试集采样次数（默认100000，独立于训练数据）
 
 #### 可视化结果
 
@@ -132,16 +133,17 @@ python example.py full     # 运行完整流程示例
 ### 训练阶段
 
 1. 创建量子纠错码电路（使用`CircuitFactory`）
-2. 采样探测器数据
+2. 采样训练数据（探测器数据）
 3. 训练各个预测方法
-4. 保存训练数据和预测结果（使用`DataManager`）
+4. 保存训练数据、ground truth DEM和预测结果（使用`DataManager`）
 
 ### 评测阶段
 
-1. 加载训练数据和预测结果
-2. 获取真实超边概率（从DEM或其他方法）
-3. 运行评测器
-4. 保存并分析评测结果
+1. 加载实验配置和预测结果
+2. **重新采样独立的测试数据**（确保泛化性）
+3. 加载保存的ground truth DEM作为真实值
+4. 运行评测器比较预测结果与真实值
+5. 保存并分析评测结果
 
 ## 扩展框架
 
@@ -199,7 +201,8 @@ class MyEvaluator(BaseEvaluator):
 data/
 └── <experiment_name>/
     ├── circuit.stim              # 电路文件
-    ├── samples.npz               # 采样数据
+    ├── ground_truth.dem          # Ground truth DEM（用于评测的真实值）
+    ├── samples.npz               # 训练数据采样
     ├── metadata.json             # 元数据
     ├── predictions/              # 预测结果
     │   ├── noise_calibration.pkl
@@ -209,6 +212,8 @@ data/
         ├── distribution_distance.json
         └── decoder_ler.json
 ```
+
+**注意**：评测时会重新从ground truth电路采样独立的测试数据，确保评测结果的泛化性。
 
 ## 支持的量子纠错码
 

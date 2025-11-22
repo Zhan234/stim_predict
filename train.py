@@ -77,7 +77,7 @@ def train_predictors(
         observables=observables,
         metadata=metadata
     )
-    print(f"训练数据已保存")
+    print(f"训练数据已保存（包含ground truth DEM用于评测）")
     
     # 4. 训练各个方法
     print("\n[4/4] 训练预测方法...")
