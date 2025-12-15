@@ -1,4 +1,4 @@
-"""基于强化学习的超图权重预测方法"""
+"""基于GRPO（Group Relative Policy Optimization）的超图权重预测方法"""
 
 import stim
 import numpy as np
@@ -11,52 +11,54 @@ from copy import deepcopy
 from .base import BasePredictor
 
 
-class RLBasedPredictor(BasePredictor):
+class GRPOPredictor(BasePredictor):
     """
-    基于强化学习的预测器
+    基于GRPO（Group Relative Policy Optimization）的预测器
     
-    使用PPO (Proximal Policy Optimization) 算法优化decoder priors
-    参考论文: Sivak et al. 2024 - Optimization of decoder priors for accurate quantum error correction
+    GRPO是一种高效的强化学习算法，基于PPO改进，去除critic模型，
+    转而通过采样一组输出的分数来估计基线，从而减少训练资源。
     
-    核心思想:
-    1. 每个agent对应一个小的sensor code
-    2. Agent的action是调整error hypergraph的参数
-    3. Reward定义为 -log10(LER)
-    4. 使用PPO更新策略
+    核心特点:
+    1. 去除critic模型，不需要值函数
+    2. 使用组内输出的相对奖励作为优势估计
+    3. 支持结果监督（Outcome Supervision）和过程监督（Process Supervision）
+    4. 使用KL散度正则化防止策略偏离参考模型
+    
+    参考: GRPO论文 - Group Relative Policy Optimization
     """
     
     def __init__(self,
-                 learning_rate: float = 1e-3,
-                 batch_size: int = 64,
+                 learning_rate: float = 1e-6,
+                 group_size: int = 64,
                  epochs: int = 100,
                  clip_ratio: float = 0.2,
-                 entropy_coef: float = 0.01,
-                 value_coef: float = 0.5,
+                 kl_coef: float = 0.04,
                  max_grad_norm: float = 0.5,
+                 supervision_mode: str = 'outcome',
                  use_gpu: bool = True):
         """
-        初始化RL预测器
+        初始化GRPO预测器
         
         Args:
-            learning_rate: 学习率
-            batch_size: 批次大小
+            learning_rate: 学习率（默认1e-6，GRPO论文推荐）
+            group_size: 组大小G（默认64，GRPO论文推荐）
             epochs: 训练轮数
-            clip_ratio: PPO重要性比率裁剪阈值
-            entropy_coef: 熵损失系数（鼓励探索）
-            value_coef: 价值函数损失系数
+            clip_ratio: PPO重要性比率裁剪阈值（类似PPO）
+            kl_coef: KL散度系数β（默认0.04）
             max_grad_norm: 梯度裁剪的最大范数
+            supervision_mode: 监督模式，'outcome'（结果监督）或'process'（过程监督）
             use_gpu: 是否使用GPU
         """
-        super().__init__(name="rl_based")
+        super().__init__(name="grpo")
         
         # 超参数
         self.learning_rate = learning_rate
-        self.batch_size = batch_size
+        self.group_size = group_size
         self.epochs = epochs
         self.clip_ratio = clip_ratio
-        self.entropy_coef = entropy_coef
-        self.value_coef = value_coef
+        self.kl_coef = kl_coef
         self.max_grad_norm = max_grad_norm
+        self.supervision_mode = supervision_mode
         self.use_gpu = use_gpu and torch.cuda.is_available()
         
         # 设备设置
@@ -70,12 +72,13 @@ class RLBasedPredictor(BasePredictor):
         self.policy_mean = None
         self.policy_std = None
         
-        # 旧策略参数（用于计算importance ratio，PPO算法核心）
+        # 旧策略参数（用于计算importance ratio）
         self.old_policy_mean = None
         self.old_policy_std = None
         
-        # Baseline（对应论文中的ba，每个agent的baseline）
-        self.baseline = None
+        # 参考策略（用于KL散度正则化）
+        self.reference_policy_mean = None
+        self.reference_policy_std = None
         
         # Tanner图
         self.tanner_graph = None
@@ -85,12 +88,13 @@ class RLBasedPredictor(BasePredictor):
             'rewards': [],
             'ler': [],
             'policy_loss': [],
-            'value_loss': []
+            'kl_loss': [],
+            'advantages': []
         }
     
     def train(self, circuit: stim.Circuit, detector_samples: np.ndarray, **kwargs) -> Dict:
         """
-        使用PPO训练RL预测器
+        使用GRPO训练预测器
         
         Args:
             circuit: Stim电路对象
@@ -135,13 +139,11 @@ class RLBasedPredictor(BasePredictor):
             )
         )
         
-        # 初始化旧策略（用于PPO importance ratio）
+        # 初始化旧策略和参考策略
         self.old_policy_mean = self.policy_mean.clone().detach()
         self.old_policy_std = self.policy_std.clone().detach()
-        
-        # 初始化baseline（论文方程G9，每个agent一个baseline，但简化为全局）
-        # 在sensor场景下应该是每个sensor一个，这里简化为单一baseline
-        self.baseline = 0.0
+        self.reference_policy_mean = self.policy_mean.clone().detach()
+        self.reference_policy_std = self.policy_std.clone().detach()
         
         # 优化器
         optimizer = torch.optim.Adam(
@@ -149,22 +151,24 @@ class RLBasedPredictor(BasePredictor):
             lr=self.learning_rate
         )
         
-        print(f"开始RL训练，共 {self.epochs} 轮，批次大小 {self.batch_size}")
+        print(f"开始GRPO训练，共 {self.epochs} 轮，组大小 {self.group_size}")
+        print(f"监督模式: {self.supervision_mode}")
         
-        # PPO训练循环
+        # GRPO训练循环
         for epoch in range(self.epochs):
-            # 1. 采样参数候选
-            log_probs_samples, probs_samples = self._sample_policy(self.batch_size)
-            probs_samples_np = probs_samples.cpu().numpy()  # 转回numpy用于后续处理
+            # 1. 从当前策略采样一组输出（group）
+            log_probs_group, probs_group = self._sample_group(self.group_size)
             
-            # 2. 评估每个候选的LER（reward）
+            # 2. 评估每个候选的奖励
             rewards = []
             lers = []
             
-            for i in range(self.batch_size):
+            for i in range(self.group_size):
                 hyperedge_probs_candidate = {}
+                probs_candidate = probs_group[i].detach().cpu().numpy()
+                
                 for j, hyperedge in enumerate(self.tanner_graph.hyperedge_probs.keys()):
-                    hyperedge_probs_candidate[hyperedge] = probs_samples_np[i, j]
+                    hyperedge_probs_candidate[hyperedge] = probs_candidate[j]
                 
                 # 构建候选DEM
                 candidate_dem = self._build_dem_from_hyperedge_probs(hyperedge_probs_candidate)
@@ -186,37 +190,37 @@ class RLBasedPredictor(BasePredictor):
             rewards = np.array(rewards)
             lers = np.array(lers)
             
-            # 3. 计算优势函数（论文方程G10）
-            advantages = rewards - self.baseline
+            # 3. 计算组内优势（GRPO核心：使用组内相对奖励）
+            advantages = self._compute_group_advantages(rewards)
             
-            # 4. PPO策略更新（论文方程G23）
-            policy_loss = self._update_policy_ppo(
-                log_probs_samples,
+            # 4. GRPO策略更新
+            policy_loss, kl_loss = self._update_policy_grpo(
+                log_probs_group,
                 advantages,
                 optimizer
             )
             
-            # 5. 更新baseline（论文方程G24）
-            baseline_loss = self._update_baseline(advantages)
-            
-            # 6. 更新baseline的值（使用指数移动平均）
-            self.baseline = 0.9 * self.baseline + 0.1 * np.mean(rewards)
+            # 5. 更新旧策略（用于下一轮的importance ratio）
+            self.old_policy_mean = self.policy_mean.clone().detach()
+            self.old_policy_std = self.policy_std.clone().detach()
             
             # 记录训练历史
             self.training_history['rewards'].append(np.mean(rewards))
             self.training_history['ler'].append(np.mean(lers))
             self.training_history['policy_loss'].append(policy_loss)
-            self.training_history['value_loss'].append(baseline_loss)
+            self.training_history['kl_loss'].append(kl_loss)
+            self.training_history['advantages'].append(np.mean(advantages))
             
             # 打印进度
             if (epoch + 1) % 10 == 0:
                 print(f"Epoch {epoch+1}/{self.epochs}: "
                       f"Mean Reward={np.mean(rewards):.3f}, "
                       f"Mean LER={np.mean(lers):.6f}, "
-                      f"Policy Loss={policy_loss:.4f}")
+                      f"Policy Loss={policy_loss:.4f}, "
+                      f"KL Loss={kl_loss:.4f}")
         
-        # 使用最终策略的均值作为预测
-        final_probs = torch.exp(self.policy_mean).detach().cpu().numpy()
+        # 使用最终策略的均值作为预测（去除梯度以便转换为numpy）
+        final_probs = torch.exp(self.policy_mean.detach()).cpu().numpy()
         final_hyperedge_probs = {}
         for i, hyperedge in enumerate(self.tanner_graph.hyperedge_probs.keys()):
             final_hyperedge_probs[hyperedge] = final_probs[i]
@@ -246,31 +250,138 @@ class RLBasedPredictor(BasePredictor):
         
         return self.hyperedge_probs
     
-    def _sample_policy(self, n_samples: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _sample_group(self, group_size: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        从当前策略采样参数
+        从当前策略采样一组输出
         
         Args:
-            n_samples: 采样数量
+            group_size: 组大小G
             
         Returns:
-            (log_probs_samples, probs_samples): 对数概率和概率张量，形状 (n_samples, n_params)
+            (log_probs_group, probs_group): 对数概率和概率张量，形状 (group_size, n_params)
         """
         n_params = len(self.policy_mean)
         
         # 从高斯策略采样（在对数空间）
-        with torch.no_grad():
-            noise = torch.randn(
-                (n_samples, n_params),
-                device=self.device,
-                dtype=torch.float32
-            )
-            log_probs_samples = self.policy_mean.unsqueeze(0) + noise * self.policy_std.unsqueeze(0)
+        # 重要：不能在 no_grad 中采样，否则梯度无法回传到 policy_mean / policy_std
+        noise = torch.randn(
+            (group_size, n_params),
+            device=self.device,
+            dtype=torch.float32
+        )
+        log_probs_group = self.policy_mean.unsqueeze(0) + noise * self.policy_std.unsqueeze(0)
         
         # 转回概率空间（并裁剪到有效范围）
-        probs_samples = torch.clamp(torch.exp(log_probs_samples), min=1e-10, max=1.0)
+        probs_group = torch.clamp(torch.exp(log_probs_group), min=1e-10, max=1.0)
         
-        return log_probs_samples, probs_samples
+        return log_probs_group, probs_group
+    
+    def _compute_group_advantages(self, rewards: np.ndarray) -> np.ndarray:
+        """
+        计算组内优势（GRPO核心）
+        
+        优势计算基于组内奖励的标准化（减去均值、除以标准差）
+        
+        Args:
+            rewards: 组内奖励数组，形状 (group_size,)
+            
+        Returns:
+            优势数组，形状 (group_size,)
+        """
+        # GRPO: 使用组内相对奖励作为优势
+        # 对于结果监督：所有token的优势为标准化奖励
+        # A_{i,t} = (r_i - mean(r)) / std(r)
+        
+        rewards_mean = np.mean(rewards)
+        rewards_std = np.std(rewards) + 1e-8  # 避免除零
+        
+        advantages = (rewards - rewards_mean) / rewards_std
+        
+        return advantages
+    
+    def _update_policy_grpo(self,
+                           log_probs_group: torch.Tensor,
+                           advantages: np.ndarray,
+                           optimizer: torch.optim.Optimizer) -> Tuple[float, float]:
+        """
+        使用GRPO更新策略
+        
+        实现GRPO目标函数（论文Equation 3）:
+        J_GRPO(θ) = E[1/G * Σ_i (π_θ/π_θ_old * A_i - β * D_KL[π_θ || π_ref])]
+        
+        Args:
+            log_probs_group: 采样的对数概率，形状 (group_size, n_params)
+            advantages: 优势数组，形状 (group_size,)
+            optimizer: 优化器
+            
+        Returns:
+            (policy_loss, kl_loss): 策略损失和KL散度损失
+        """
+        group_size, n_params = log_probs_group.shape
+        advantages_tensor = torch.tensor(
+            advantages,
+            dtype=torch.float32,
+            device=self.device
+        )
+        
+        # 计算当前策略的对数概率
+        # log π_θ(p) = -0.5 * ((p - μ) / σ)^2 - log(σ) - 0.5*log(2π)
+        z_current = (log_probs_group - self.policy_mean.unsqueeze(0)) / (self.policy_std.unsqueeze(0) + 1e-10)
+        log_prob_current = -0.5 * torch.sum(z_current ** 2, dim=1) - torch.sum(torch.log(self.policy_std + 1e-10))
+        
+        # 计算旧策略的对数概率
+        z_old = (log_probs_group - self.old_policy_mean.unsqueeze(0)) / (self.old_policy_std.unsqueeze(0) + 1e-10)
+        log_prob_old = -0.5 * torch.sum(z_old ** 2, dim=1) - torch.sum(torch.log(self.old_policy_std + 1e-10))
+        
+        # 计算importance ratio: π_θ / π_θ_old
+        log_ratio = log_prob_current - log_prob_old
+        importance_ratio = torch.exp(torch.clamp(log_ratio, -10, 10))
+        
+        # PPO clipping
+        importance_ratio_clipped = torch.clamp(
+            importance_ratio,
+            1.0 - self.clip_ratio,
+            1.0 + self.clip_ratio
+        )
+        
+        # 计算KL散度（无偏估计）
+        # 根据GRPO论文，KL散度估计器为：
+        # D_KL[π_θ || π_ref] = E[π_ref/π_θ * log(π_ref/π_θ) - 1]
+        # 或者更标准的：D_KL[π_θ || π_ref] = E_π_θ[log(π_θ/π_ref)]
+        z_ref = (log_probs_group - self.reference_policy_mean.unsqueeze(0)) / (self.reference_policy_std.unsqueeze(0) + 1e-10)
+        log_prob_ref = -0.5 * torch.sum(z_ref ** 2, dim=1) - torch.sum(torch.log(self.reference_policy_std + 1e-10))
+        
+        # 使用标准KL散度公式：D_KL[π_θ || π_ref] = E_π_θ[log(π_θ/π_ref)]
+        log_ratio_kl = log_prob_current - log_prob_ref
+        kl_div = log_ratio_kl
+        
+        # GRPO目标函数
+        # J = E[(π_θ/π_θ_old * A) - β * D_KL]
+        # 使用clipped importance ratio
+        # advantages_tensor形状为(group_size,)，需要扩展到每个样本
+        policy_objective = importance_ratio_clipped * advantages_tensor
+        kl_penalty = self.kl_coef * kl_div
+        
+        # 目标函数（最大化，所以取负号作为损失）
+        loss = -torch.mean(policy_objective - kl_penalty)
+        
+        # 反向传播
+        optimizer.zero_grad()
+        loss.backward()
+        
+        # 梯度裁剪
+        torch.nn.utils.clip_grad_norm_(
+            [self.policy_mean, self.policy_std],
+            self.max_grad_norm
+        )
+        
+        optimizer.step()
+        
+        # 计算用于监控的损失值
+        policy_loss = -torch.mean(policy_objective).item()
+        kl_loss = torch.mean(kl_penalty).item()
+        
+        return policy_loss, kl_loss
     
     def _build_dem_from_hyperedge_probs(self, hyperedge_probs: Dict[Tuple, float]) -> stim.DetectorErrorModel:
         """
@@ -346,105 +457,9 @@ class RLBasedPredictor(BasePredictor):
             print(f"解码失败: {e}")
             return 1.0
     
-    def _update_policy_ppo(self,
-                          log_probs_samples: torch.Tensor,
-                          advantages: np.ndarray,
-                          optimizer: torch.optim.Optimizer) -> float:
-        """
-        使用PPO更新策略（基于论文Appendix G）
-        
-        Args:
-            log_probs_samples: 采样的对数概率，形状 (batch_size, n_params)
-            advantages: 优势函数值，形状 (batch_size,)
-            optimizer: PyTorch优化器
-            
-        Returns:
-            策略损失
-        """
-        batch_size, n_params = log_probs_samples.shape
-        advantages_tensor = torch.tensor(
-            advantages,
-            dtype=torch.float32,
-            device=self.device
-        )
-        
-        # 计算当前策略的对数概率
-        # log π_θ(p) = -0.5 * ((p - μ) / σ)^2 - log(σ) - 0.5*log(2π)
-        z_current = (log_probs_samples - self.policy_mean.unsqueeze(0)) / (self.policy_std.unsqueeze(0) + 1e-10)
-        log_prob_current = -0.5 * torch.sum(z_current ** 2, dim=1) - torch.sum(torch.log(self.policy_std + 1e-10))
-            
-        # 计算旧策略的对数概率
-        z_old = (log_probs_samples - self.old_policy_mean.unsqueeze(0)) / (self.old_policy_std.unsqueeze(0) + 1e-10)
-        log_prob_old = -0.5 * torch.sum(z_old ** 2, dim=1) - torch.sum(torch.log(self.old_policy_std + 1e-10))
-            
-        # 计算importance ratio: π_θ / π_θ_old
-        log_ratio = log_prob_current - log_prob_old
-        importance_ratio = torch.exp(torch.clamp(log_ratio, -10, 10))
-        
-        # PPO clipping
-        importance_ratio_clipped = torch.clamp(
-            importance_ratio,
-            1.0 - self.clip_ratio,
-            1.0 + self.clip_ratio
-        )
-        
-        # 标准化advantages（减少方差）
-        advantages_normalized = (advantages_tensor - torch.mean(advantages_tensor)) / (torch.std(advantages_tensor) + 1e-8)
-        
-        # PPO目标函数（最大化，所以取负号作为损失）
-        # Lpolicy = -E[min(ratio * A, clipped_ratio * A)]
-        policy_objective = torch.min(
-            importance_ratio * advantages_normalized,
-            importance_ratio_clipped * advantages_normalized
-        )
-        loss = -torch.mean(policy_objective)
-        
-        # 反向传播
-        optimizer.zero_grad()
-        loss.backward()
-        
-        # 梯度裁剪
-        torch.nn.utils.clip_grad_norm_(
-            [self.policy_mean, self.policy_std],
-            self.max_grad_norm
-        )
-        
-        optimizer.step()
-        
-        # 更新旧策略（用于下一轮的importance ratio）
-        self.old_policy_mean = self.policy_mean.clone().detach()
-        self.old_policy_std = self.policy_std.clone().detach()
-        
-        # 更新标准差（逐渐减小探索）
-        with torch.no_grad():
-            self.policy_std.data = torch.clamp(self.policy_std.data * 0.995, min=0.1)
-        
-        # 计算policy loss用于监控
-        policy_loss = -torch.mean(policy_objective).item()
-        
-        return policy_loss
-    
-    def _update_baseline(self, advantages: np.ndarray) -> float:
-        """
-        更新baseline（论文方程G24）
-        
-        Args:
-            advantages: 优势函数值
-            
-        Returns:
-            baseline损失
-        """
-        # 论文方程G24: Lbaseline = E[||α(p)||²]
-        # 这个损失用于监控baseline的质量
-        # baseline越好，advantages的方差越小
-        
-        baseline_loss = np.mean(advantages ** 2)
-        
-        return baseline_loss
-    
     def get_detector_error_model(self, circuit: stim.Circuit = None) -> stim.DetectorErrorModel:
         """
-        获取RL优化后的探测器错误模型
+        获取GRPO优化后的探测器错误模型
         
         Args:
             circuit: Stim电路对象（可选）
