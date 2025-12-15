@@ -7,7 +7,7 @@ numpy>=1.21.0
 scipy>=1.7.0
 
 # 可选依赖（用于RL方法）
-# torch>=2.0.0  # 如果需要更复杂的RL实现
+torch>=2.0.0  # GRPO方法需要PyTorch进行GPU加速
 
 # correlation库（假设已经安装在本地）
 # 如果是本地包，可以通过以下方式安装：

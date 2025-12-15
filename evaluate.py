@@ -1,8 +1,10 @@
 """评测脚本 - 评测各种预测方法的性能"""
 
 import argparse
+import json
+import os
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import stim
 
 from utils import DataManager
@@ -82,8 +84,6 @@ def evaluate_predictions(
     if ground_truth_method == 'dem':
         # 从保存的ground truth DEM文件加载
         import correlation
-        import os
-        
         dem_path = os.path.join(data_manager.base_dir, experiment_name, "ground_truth.dem")
         if os.path.exists(dem_path):
             with open(dem_path, 'r') as f:
@@ -216,36 +216,117 @@ def evaluate_predictions(
     print("=" * 80)
 
 
+def load_config(config_path: str) -> Dict[str, Any]:
+    """
+    加载配置文件
+    
+    Args:
+        config_path: 配置文件路径
+        
+    Returns:
+        配置字典
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"配置文件不存在: {config_path}")
+    
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    
+    return config
+
+
+def merge_config_and_args(config: Optional[Dict[str, Any]], args: argparse.Namespace) -> Dict[str, Any]:
+    """
+    合并配置文件和命令行参数（优先级：命令行 > 配置 > 默认）
+    """
+    params = {}
+    
+    if config:
+        params['experiment_name'] = config.get('experiment_name', '')
+        eval_cfg = config.get('evaluation', {})
+        params['methods'] = eval_cfg.get('methods', config.get('training', {}).get('methods', ['correlation']))
+        params['evaluators'] = eval_cfg.get('evaluators', ['distribution_distance', 'decoder_ler'])
+        params['ground_truth'] = eval_cfg.get('ground_truth', 'dem')
+        params['decoders'] = eval_cfg.get('decoders', ['pymatching', 'pymatching_corr'])
+        params['test_shots'] = eval_cfg.get('test_shots', 100000)
+    else:
+        params['experiment_name'] = ''
+        params['methods'] = ['correlation']
+        params['evaluators'] = ['distribution_distance', 'decoder_ler']
+        params['ground_truth'] = 'dem'
+        params['decoders'] = ['pymatching', 'pymatching_corr']
+        params['test_shots'] = 100000
+    
+    # 命令行覆盖
+    if args.experiment is not None:
+        params['experiment_name'] = args.experiment
+    if args.methods is not None:
+        params['methods'] = args.methods
+    if args.evaluators is not None:
+        params['evaluators'] = args.evaluators
+    if args.ground_truth is not None:
+        params['ground_truth'] = args.ground_truth
+    if args.decoders is not None:
+        params['decoders'] = args.decoders
+    if args.test_shots is not None:
+        params['test_shots'] = args.test_shots
+    
+    return params
+
+
 def main():
     """命令行入口"""
     parser = argparse.ArgumentParser(description='评测超图权重预测方法')
     
-    parser.add_argument('--experiment', type=str, required=True,
-                       help='实验名称')
-    parser.add_argument('--methods', type=str, nargs='+',
-                       default=['noise_calibration', 'correlation'],
-                       help='要评测的方法列表')
-    parser.add_argument('--evaluators', type=str, nargs='+',
-                       default=['distribution_distance', 'decoder_ler'],
+    parser.add_argument('--config', type=str, default=None,
+                       help='配置文件路径（JSON格式，可选）')
+    parser.add_argument('--experiment', type=str, default=None,
+                       help='实验名称（覆盖配置文件）')
+    parser.add_argument('--methods', type=str, nargs='+', default=None,
+                       help='要评测的方法列表（覆盖配置文件）')
+    parser.add_argument('--evaluators', type=str, nargs='+', default=None,
                        choices=['distribution_distance', 'decoder_ler'],
-                       help='要使用的评测器列表')
-    parser.add_argument('--ground-truth', type=str, default='dem',
-                       help='真实值来源 (dem 或某个方法名)')
-    parser.add_argument('--decoders', type=str, nargs='+',
-                       default=['pymatching', 'pymatching_corr'],
-                       help='要测试的解码器列表')
-    parser.add_argument('--test-shots', type=int, default=100000,
-                       help='测试集采样次数（默认100000）')
+                       help='要使用的评测器列表（覆盖配置文件）')
+    parser.add_argument('--ground-truth', type=str, default=None,
+                       help='真实值来源 (dem 或某个方法名，覆盖配置文件)')
+    parser.add_argument('--decoders', type=str, nargs='+', default=None,
+                       help='要测试的解码器列表（覆盖配置文件）')
+    parser.add_argument('--test-shots', type=int, default=None,
+                       help='测试集采样次数（覆盖配置文件）')
     
     args = parser.parse_args()
     
+    # 加载配置
+    config = None
+    if args.config:
+        try:
+            config = load_config(args.config)
+            print(f"已加载配置文件: {args.config}")
+        except Exception as e:
+            print(f"警告: 加载配置文件失败: {e}")
+            print("将使用命令行参数和默认值")
+    
+    params = merge_config_and_args(config, args)
+    
+    if not params['experiment_name']:
+        parser.error("--experiment 参数是必需的，或必须在配置文件中指定 experiment_name")
+    
+    print("\n使用的评测参数:")
+    print(f"  实验名称: {params['experiment_name']}")
+    print(f"  方法列表: {params['methods']}")
+    print(f"  评测器: {params['evaluators']}")
+    print(f"  真实值: {params['ground_truth']}")
+    print(f"  解码器: {params['decoders']}")
+    print(f"  测试集大小: {params['test_shots']}")
+    print()
+    
     evaluate_predictions(
-        experiment_name=args.experiment,
-        methods=args.methods,
-        evaluators=args.evaluators,
-        ground_truth_method=args.ground_truth,
-        decoders=args.decoders,
-        test_shots=args.test_shots
+        experiment_name=params['experiment_name'],
+        methods=params['methods'],
+        evaluators=params['evaluators'],
+        ground_truth_method=params['ground_truth'],
+        decoders=params['decoders'],
+        test_shots=params['test_shots']
     )
 
 
