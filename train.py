@@ -8,7 +8,7 @@ from typing import List, Optional, Dict, Any
 import stim
 
 from circuits import CircuitFactory
-from methods import CorrelationPredictor, RLBasedPredictor, GRPOPredictor
+from methods import CorrelationPredictor, RLBasedPredictor, GRPOPredictor, DQNPredictor
 from utils import DataManager
 
 
@@ -39,7 +39,14 @@ def train_predictors(
     grpo_kl_coef: float = 0.04,
     grpo_max_grad_norm: float = 0.5,
     grpo_supervision_mode: str = 'outcome',
-    grpo_use_gpu: bool = True
+    grpo_use_gpu: bool = True,
+    dqn_epochs: int = 50,
+    dqn_batch_size: int = 32,
+    dqn_lr_actor: float = 1e-3,
+    dqn_lr_critic: float = 1e-3,
+    dqn_buffer_size: int = 1000,
+    dqn_exploration_noise: float = 0.1,
+    dqn_use_gpu: bool = True
 ):
     """
     训练多个预测方法
@@ -160,6 +167,23 @@ def train_predictors(
                 print(f"训练完成，共 {len(result['hyperedge_probs'])} 个超边")
                 print(f"最终平均奖励: {result['final_mean_reward']:.3f}")
                 print(f"最终平均LER: {result['final_mean_ler']:.6f}")
+                
+            elif method_name == 'dqn':
+                predictor = DQNPredictor(
+                    epochs=dqn_epochs,
+                    batch_size=dqn_batch_size,
+                    learning_rate_actor=dqn_lr_actor,
+                    learning_rate_critic=dqn_lr_critic,
+                    buffer_size=dqn_buffer_size,
+                    exploration_noise=dqn_exploration_noise,
+                    use_gpu=dqn_use_gpu
+                )
+                result = predictor.train(
+                    circuit,
+                    detector_samples,
+                    observables=observables
+                )
+                print(f"训练完成，共 {len(result['hyperedge_probs'])} 个超边")
                 
             else:
                 print(f"警告: 未知的方法 '{method_name}'，跳过")
@@ -453,10 +477,16 @@ def main():
         grpo_kl_coef=params['grpo_kl_coef'],
         grpo_max_grad_norm=params['grpo_max_grad_norm'],
         grpo_supervision_mode=params['grpo_supervision_mode'],
-        grpo_use_gpu=params['grpo_use_gpu']
+        grpo_use_gpu=params['grpo_use_gpu'],
+        dqn_epochs=params.get('dqn_epochs', 50),
+        dqn_batch_size=params.get('dqn_batch_size', 32),
+        dqn_lr_actor=params.get('dqn_lr_actor', 1e-3),
+        dqn_lr_critic=params.get('dqn_lr_critic', 1e-3),
+        dqn_buffer_size=params.get('dqn_buffer_size', 1000),
+        dqn_exploration_noise=params.get('dqn_exploration_noise', 2.0),
+        dqn_use_gpu=params.get('dqn_use_gpu', True)
     )
 
 
 if __name__ == '__main__':
     main()
-
