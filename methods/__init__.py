@@ -4,11 +4,13 @@ from .base import BasePredictor
 from .correlation import CorrelationPredictor
 from .rl_based import RLBasedPredictor
 from .grpo import GRPOPredictor
+from .ac import ACPredictor
 
 __all__ = [
     'BasePredictor',
     'CorrelationPredictor',
     'RLBasedPredictor',
     'GRPOPredictor',
+    'ACPredictor',
 ]
 
