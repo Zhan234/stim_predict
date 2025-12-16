@@ -1,5 +1,5 @@
 {
-  "experiment_name": "ac_test7",
+  "experiment_name": "example_experiment",
   "circuit": {
     "code_type": "surface_code",
     "distance": 5,
