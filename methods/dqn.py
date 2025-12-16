@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from typing import Dict, Tuple, Any, List, Optional
+from typing import Dict, Tuple
 import correlation
 from collections import deque
 import random
@@ -101,8 +101,21 @@ class DQNPredictor(BasePredictor):
         n_params = len(self.tanner_graph.hyperedge_probs)
         
         # 初始化 Actor (权重参数)
-        # 从原始概率的对数开始
-        init_probs = np.array([p for p in self.tanner_graph.hyperedge_probs.values()])
+        # 策略: 'warm_start' (从基准DEM开始) 或 'uniform' (从均匀分布开始)
+        # 为了展示RL的学习能力，建议使用 'uniform'，或者在有复杂噪声时使用 'random'
+        init_strategy = kwargs.get('init_strategy', 'uniform')
+        
+        if init_strategy == 'warm_start':
+            print("初始化策略: Warm Start (使用基准DEM概率)")
+            init_probs = np.array([p for p in self.tanner_graph.hyperedge_probs.values()])
+        elif init_strategy == 'uniform':
+            print("初始化策略: Uniform (使用统一小概率 0.001)")
+            # 使用一个较小的统一概率，相当于所有边的权重初始相同
+            init_probs = np.full(n_params, 0.001)
+        else: # random
+            print("初始化策略: Random (随机初始化)")
+            init_probs = np.random.uniform(1e-4, 1e-2, n_params)
+
         init_probs = np.clip(init_probs, 1e-10, 1.0)
         # 我们优化的是 log(prob)，这样可以保证 prob > 0
         self.actor_params = nn.Parameter(
@@ -213,7 +226,7 @@ class DQNPredictor(BasePredictor):
         
         for hyperedge, prob in hyperedge_probs.items():
             if prob > 0:
-                prob = np.clip(prob, 1e-10, 1.0)
+                prob = np.clip(prob, 1e-7, 0.8)
                 
                 # 注意：这里依赖 correlation 库的 TannerGraph 实现
                 if hasattr(self.tanner_graph, 'stim_decompose'):

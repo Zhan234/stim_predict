@@ -45,7 +45,7 @@ def train_predictors(
     dqn_lr_actor: float = 1e-3,
     dqn_lr_critic: float = 1e-3,
     dqn_buffer_size: int = 1000,
-    dqn_exploration_noise: float = 0.1,
+    dqn_exploration_noise: float = 2.0,
     dqn_use_gpu: bool = True
 ):
     """
@@ -478,7 +478,7 @@ def main():
         grpo_max_grad_norm=params['grpo_max_grad_norm'],
         grpo_supervision_mode=params['grpo_supervision_mode'],
         grpo_use_gpu=params['grpo_use_gpu'],
-        dqn_epochs=params.get('dqn_epochs', 50),
+        dqn_epochs=params.get('dqn_epochs', 200),
         dqn_batch_size=params.get('dqn_batch_size', 32),
         dqn_lr_actor=params.get('dqn_lr_actor', 1e-3),
         dqn_lr_critic=params.get('dqn_lr_critic', 1e-3),
