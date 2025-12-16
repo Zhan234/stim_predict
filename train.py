@@ -8,7 +8,7 @@ from typing import List, Optional, Dict, Any
 import stim
 
 from circuits import CircuitFactory
-from methods import CorrelationPredictor, RLBasedPredictor, GRPOPredictor, ACPredictor
+from methods import CorrelationPredictor, RLBasedPredictor, GRPOPredictor, ACPredictor, DQNPredictor
 from utils import DataManager
 
 
@@ -51,6 +51,13 @@ def train_predictors(
     ac_use_gpu: bool = True,
     ac_eval_frequency: int = 10,
     ac_action_scale: float = 0.05
+    dqn_epochs: int = 50,
+    dqn_batch_size: int = 32,
+    dqn_lr_actor: float = 1e-3,
+    dqn_lr_critic: float = 1e-3,
+    dqn_buffer_size: int = 1000,
+    dqn_exploration_noise: float = 2.0,
+    dqn_use_gpu: bool = True
 ):
     """
     训练多个预测方法
@@ -188,6 +195,18 @@ def train_predictors(
                 )
                 result = predictor.train(
                     circuit, 
+            elif method_name == 'dqn':
+                predictor = DQNPredictor(
+                    epochs=dqn_epochs,
+                    batch_size=dqn_batch_size,
+                    learning_rate_actor=dqn_lr_actor,
+                    learning_rate_critic=dqn_lr_critic,
+                    buffer_size=dqn_buffer_size,
+                    exploration_noise=dqn_exploration_noise,
+                    use_gpu=dqn_use_gpu
+                )
+                result = predictor.train(
+                    circuit,
                     detector_samples,
                     observables=observables
                 )
@@ -559,9 +578,15 @@ def main():
         ac_use_gpu=params['ac_use_gpu'],
         ac_eval_frequency=params['ac_eval_frequency'],
         ac_action_scale=params['ac_action_scale']
+        dqn_epochs=params.get('dqn_epochs', 200),
+        dqn_batch_size=params.get('dqn_batch_size', 32),
+        dqn_lr_actor=params.get('dqn_lr_actor', 1e-3),
+        dqn_lr_critic=params.get('dqn_lr_critic', 1e-3),
+        dqn_buffer_size=params.get('dqn_buffer_size', 1000),
+        dqn_exploration_noise=params.get('dqn_exploration_noise', 2.0),
+        dqn_use_gpu=params.get('dqn_use_gpu', True)
     )
 
 
 if __name__ == '__main__':
     main()
-

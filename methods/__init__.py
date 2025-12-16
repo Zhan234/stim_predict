@@ -5,6 +5,7 @@ from .correlation import CorrelationPredictor
 from .rl_based import RLBasedPredictor
 from .grpo import GRPOPredictor
 from .ac import ACPredictor
+from .dqn import DQNPredictor
 
 __all__ = [
     'BasePredictor',
@@ -12,5 +13,5 @@ __all__ = [
     'RLBasedPredictor',
     'GRPOPredictor',
     'ACPredictor',
+    'DQNPredictor',
 ]
-
