@@ -8,7 +8,7 @@ from typing import List, Optional, Dict, Any
 import stim
 
 from circuits import CircuitFactory
-from methods import CorrelationPredictor, RLBasedPredictor, GRPOPredictor, DQNPredictor
+from methods import CorrelationPredictor, RLBasedPredictor, GRPOPredictor, ACPredictor, DQNPredictor
 from utils import DataManager
 
 
@@ -40,6 +40,17 @@ def train_predictors(
     grpo_max_grad_norm: float = 0.5,
     grpo_supervision_mode: str = 'outcome',
     grpo_use_gpu: bool = True,
+    ac_epochs: int = 100,
+    ac_batch_size: int = 32,
+    ac_learning_rate_actor: float = 1e-4,
+    ac_learning_rate_critic: float = 1e-3,
+    ac_hidden_dim: int = 128,
+    ac_gamma: float = 0.99,
+    ac_entropy_coef: float = 0.01,
+    ac_max_grad_norm: float = 0.5,
+    ac_use_gpu: bool = True,
+    ac_eval_frequency: int = 10,
+    ac_action_scale: float = 0.05
     dqn_epochs: int = 50,
     dqn_batch_size: int = 32,
     dqn_lr_actor: float = 1e-3,
@@ -168,6 +179,22 @@ def train_predictors(
                 print(f"最终平均奖励: {result['final_mean_reward']:.3f}")
                 print(f"最终平均LER: {result['final_mean_ler']:.6f}")
                 
+            elif method_name == 'actor_critic' or method_name == 'ac':
+                predictor = ACPredictor(
+                    learning_rate_actor=ac_learning_rate_actor,
+                    learning_rate_critic=ac_learning_rate_critic,
+                    batch_size=ac_batch_size,
+                    epochs=ac_epochs,
+                    hidden_dim=ac_hidden_dim,
+                    gamma=ac_gamma,
+                    entropy_coef=ac_entropy_coef,
+                    max_grad_norm=ac_max_grad_norm,
+                    use_gpu=ac_use_gpu,
+                    eval_frequency=ac_eval_frequency,
+                    action_scale=ac_action_scale
+                )
+                result = predictor.train(
+                    circuit, 
             elif method_name == 'dqn':
                 predictor = DQNPredictor(
                     epochs=dqn_epochs,
@@ -184,6 +211,8 @@ def train_predictors(
                     observables=observables
                 )
                 print(f"训练完成，共 {len(result['hyperedge_probs'])} 个超边")
+                print(f"最终平均奖励: {result['final_mean_reward']:.3f}")
+                print(f"最终平均LER: {result['final_mean_ler']:.6f}")
                 
             else:
                 print(f"警告: 未知的方法 '{method_name}'，跳过")
@@ -270,6 +299,17 @@ def merge_config_and_args(config: Optional[Dict[str, Any]], args: argparse.Names
         params['grpo_max_grad_norm'] = config.get('training', {}).get('grpo', {}).get('max_grad_norm', 0.5)
         params['grpo_supervision_mode'] = config.get('training', {}).get('grpo', {}).get('supervision_mode', 'outcome')
         params['grpo_use_gpu'] = config.get('training', {}).get('grpo', {}).get('use_gpu', True)
+        params['ac_epochs'] = config.get('training', {}).get('ac', {}).get('epochs', 100)
+        params['ac_batch_size'] = config.get('training', {}).get('ac', {}).get('batch_size', 32)
+        params['ac_learning_rate_actor'] = config.get('training', {}).get('ac', {}).get('learning_rate_actor', 1e-4)
+        params['ac_learning_rate_critic'] = config.get('training', {}).get('ac', {}).get('learning_rate_critic', 1e-3)
+        params['ac_hidden_dim'] = config.get('training', {}).get('ac', {}).get('hidden_dim', 128)
+        params['ac_gamma'] = config.get('training', {}).get('ac', {}).get('gamma', 0.99)
+        params['ac_entropy_coef'] = config.get('training', {}).get('ac', {}).get('entropy_coef', 0.01)
+        params['ac_max_grad_norm'] = config.get('training', {}).get('ac', {}).get('max_grad_norm', 0.5)
+        params['ac_use_gpu'] = config.get('training', {}).get('ac', {}).get('use_gpu', True)
+        params['ac_eval_frequency'] = config.get('training', {}).get('ac', {}).get('eval_frequency', 10)
+        params['ac_action_scale'] = config.get('training', {}).get('ac', {}).get('action_scale', 0.05)
     else:
         # 使用默认值
         params['experiment_name'] = ''
@@ -299,6 +339,17 @@ def merge_config_and_args(config: Optional[Dict[str, Any]], args: argparse.Names
         params['grpo_max_grad_norm'] = 0.5
         params['grpo_supervision_mode'] = 'outcome'
         params['grpo_use_gpu'] = True
+        params['ac_epochs'] = 100
+        params['ac_batch_size'] = 32
+        params['ac_learning_rate_actor'] = 1e-4
+        params['ac_learning_rate_critic'] = 1e-3
+        params['ac_hidden_dim'] = 128
+        params['ac_gamma'] = 0.99
+        params['ac_entropy_coef'] = 0.01
+        params['ac_max_grad_norm'] = 0.5
+        params['ac_use_gpu'] = True
+        params['ac_eval_frequency'] = 10
+        params['ac_action_scale'] = 0.05
     
     # 命令行参数覆盖配置文件（优先级更高）
     if args.experiment is not None:
@@ -357,6 +408,28 @@ def merge_config_and_args(config: Optional[Dict[str, Any]], args: argparse.Names
         params['grpo_supervision_mode'] = args.grpo_supervision_mode
     if getattr(args, 'grpo_use_gpu', None) is not None:
         params['grpo_use_gpu'] = args.grpo_use_gpu
+    if getattr(args, 'ac_epochs', None) is not None:
+        params['ac_epochs'] = args.ac_epochs
+    if getattr(args, 'ac_batch_size', None) is not None:
+        params['ac_batch_size'] = args.ac_batch_size
+    if getattr(args, 'ac_learning_rate_actor', None) is not None:
+        params['ac_learning_rate_actor'] = args.ac_learning_rate_actor
+    if getattr(args, 'ac_learning_rate_critic', None) is not None:
+        params['ac_learning_rate_critic'] = args.ac_learning_rate_critic
+    if getattr(args, 'ac_hidden_dim', None) is not None:
+        params['ac_hidden_dim'] = args.ac_hidden_dim
+    if getattr(args, 'ac_gamma', None) is not None:
+        params['ac_gamma'] = args.ac_gamma
+    if getattr(args, 'ac_entropy_coef', None) is not None:
+        params['ac_entropy_coef'] = args.ac_entropy_coef
+    if getattr(args, 'ac_max_grad_norm', None) is not None:
+        params['ac_max_grad_norm'] = args.ac_max_grad_norm
+    if getattr(args, 'ac_use_gpu', None) is not None:
+        params['ac_use_gpu'] = args.ac_use_gpu
+    if getattr(args, 'ac_eval_frequency', None) is not None:
+        params['ac_eval_frequency'] = args.ac_eval_frequency
+    if getattr(args, 'ac_action_scale', None) is not None:
+        params['ac_action_scale'] = args.ac_action_scale
     
     return params
 
@@ -400,6 +473,10 @@ def main():
                        help='GRPO方法的训练轮数（覆盖配置文件）')
     parser.add_argument('--grpo-group-size', type=int, default=None,
                        help='GRPO方法的组大小（覆盖配置文件）')
+    parser.add_argument('--ac-epochs', type=int, default=None,
+                       help='Actor-Critic方法的训练轮数（覆盖配置文件）')
+    parser.add_argument('--ac-batch-size', type=int, default=None,
+                       help='Actor-Critic方法的批次大小（覆盖配置文件）')
     
     args = parser.parse_args()
     
@@ -449,6 +526,18 @@ def main():
         print(f"  GRPO梯度裁剪: {params['grpo_max_grad_norm']}")
         print(f"  GRPO监督模式: {params['grpo_supervision_mode']}")
         print(f"  GRPO使用GPU: {params['grpo_use_gpu']}")
+    if 'ac' in params['methods'] or 'actor_critic' in params['methods']:
+        print(f"  AC训练轮数: {params['ac_epochs']}")
+        print(f"  AC批次大小: {params['ac_batch_size']}")
+        print(f"  AC Actor学习率: {params['ac_learning_rate_actor']}")
+        print(f"  AC Critic学习率: {params['ac_learning_rate_critic']}")
+        print(f"  AC隐藏层维度: {params['ac_hidden_dim']}")
+        print(f"  AC折扣因子: {params['ac_gamma']}")
+        print(f"  AC熵系数: {params['ac_entropy_coef']}")
+        print(f"  AC梯度裁剪: {params['ac_max_grad_norm']}")
+        print(f"  AC使用GPU: {params['ac_use_gpu']}")
+        print(f"  AC评估频率: 每{params['ac_eval_frequency']}轮")
+        print(f"  AC动作缩放: {params['ac_action_scale']}")
     print()
     
     train_predictors(
@@ -478,6 +567,17 @@ def main():
         grpo_max_grad_norm=params['grpo_max_grad_norm'],
         grpo_supervision_mode=params['grpo_supervision_mode'],
         grpo_use_gpu=params['grpo_use_gpu'],
+        ac_epochs=params['ac_epochs'],
+        ac_batch_size=params['ac_batch_size'],
+        ac_learning_rate_actor=params['ac_learning_rate_actor'],
+        ac_learning_rate_critic=params['ac_learning_rate_critic'],
+        ac_hidden_dim=params['ac_hidden_dim'],
+        ac_gamma=params['ac_gamma'],
+        ac_entropy_coef=params['ac_entropy_coef'],
+        ac_max_grad_norm=params['ac_max_grad_norm'],
+        ac_use_gpu=params['ac_use_gpu'],
+        ac_eval_frequency=params['ac_eval_frequency'],
+        ac_action_scale=params['ac_action_scale']
         dqn_epochs=params.get('dqn_epochs', 200),
         dqn_batch_size=params.get('dqn_batch_size', 32),
         dqn_lr_actor=params.get('dqn_lr_actor', 1e-3),

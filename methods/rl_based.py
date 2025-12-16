@@ -115,9 +115,9 @@ class RLBasedPredictor(BasePredictor):
         # 初始化策略参数
         n_params = len(self.tanner_graph.hyperedge_probs)
         
-        # 从原始概率初始化（对数空间）
-        init_probs = np.array([p for p in self.tanner_graph.hyperedge_probs.values()])
-        init_probs = np.clip(init_probs, 1e-10, 1.0)  # 避免log(0)
+        # 使用平坦的小概率初始化，避免依赖DEM先验
+        init_probs = np.ones(n_params) * 1e-3
+        init_probs = np.clip(init_probs, 1e-10, 0.49)
         
         # 转换为PyTorch张量（需要requires_grad=True以便优化）
         self.policy_mean = nn.Parameter(

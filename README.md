@@ -11,6 +11,7 @@
 1. **correlation**: 基于相关性分析的方法，支持数值方法（高阶相关性）和解析方法（二阶相关性，适用于重复码等简单拓扑）
 2. **rl_based**: 基于强化学习（PPO）的方法，通过优化decoder priors来最小化逻辑错误率
 3. **grpo**: 基于GRPO（Group Relative Policy Optimization）的方法，去除critic模型，使用组内相对奖励作为优势估计，更高效且内存友好
+4. **actor_critic (ac)**: 基于Actor-Critic算法的方法，使用独立的Actor和Critic网络，通过TD误差学习价值函数并优化策略，更稳定的梯度估计
 
 ### 评测指标
 
@@ -27,7 +28,8 @@ stim_predict/
 │   ├── base.py                  # 基类定义
 │   ├── correlation.py           # 相关性方法
 │   ├── rl_based.py              # 强化学习方法（PPO）
-│   └── grpo.py                  # GRPO方法
+│   ├── grpo.py                  # GRPO方法
+│   └── ac.py                    # Actor-Critic方法
 ├── circuits/                    # 电路生成
 │   └── circuit_factory.py       # 电路工厂（支持surface code, repetition code等）
 ├── evaluators/                  # 评测器
@@ -91,7 +93,7 @@ evaluator = DistributionDistanceEvaluator()
   "sampling": { "n_shots": 100000 },
   "training": {
     "num_workers": 8,
-    "methods": ["correlation", "rl_based", "grpo"],
+    "methods": ["correlation", "rl_based", "grpo", "actor_critic"],
     "correlation": {
       "use_numerical": true,
       "num_workers": 16
@@ -115,10 +117,22 @@ evaluator = DistributionDistanceEvaluator()
       "max_grad_norm": 0.5,
       "supervision_mode": "outcome",
       "use_gpu": true
+    },
+    "ac": {
+      "learning_rate_actor": 1e-4,
+      "learning_rate_critic": 1e-3,
+      "epochs": 100,
+      "batch_size": 32,
+      "hidden_dim": 128,
+      "gamma": 0.99,
+      "entropy_coef": 0.01,
+      "max_grad_norm": 0.5,
+      "use_gpu": true,
+      "eval_frequency": 10
     }
   },
   "evaluation": {
-    "methods": ["correlation", "rl_based", "grpo"],
+    "methods": ["correlation", "rl_based", "grpo", "actor_critic"],
     "evaluators": ["distribution_distance", "decoder_ler"],
     "ground_truth": "dem",
     "decoders": ["pymatching", "pymatching_corr"],
@@ -138,7 +152,7 @@ python train.py --config config.json
 
 ```bash
 cd stim_predict
-python train.py --experiment my_exp --code-type surface_code --distance 5 --rounds 5 --noise 0.001 --shots 100000 --methods correlation rl_based grpo
+python train.py --experiment my_exp --code-type surface_code --distance 5 --rounds 5 --noise 0.001 --shots 100000 --methods correlation rl_based grpo actor_critic
 ```
 
 **方式3：混合使用（命令行参数覆盖配置文件）**
@@ -161,7 +175,9 @@ python train.py --config config.json --experiment my_custom_exp --distance 7
 - `--rl-batch-size`: RL方法的批次大小（仅用于rl_based方法）
 - `--grpo-epochs`: GRPO方法的训练轮数（仅用于grpo方法）
 - `--grpo-group-size`: GRPO方法的组大小（仅用于grpo方法）
-- 更多超参（如Correlation的use_numerical/num_workers，RL/GRPO的learning_rate、clip_ratio、kl_coef、max_grad_norm、use_gpu、supervision_mode等）可在 `config.json` 的 `training` 下各自子块配置
+- `--ac-epochs`: Actor-Critic方法的训练轮数（仅用于ac方法）
+- `--ac-batch-size`: Actor-Critic方法的批次大小（仅用于ac方法）
+- 更多超参（如Correlation的use_numerical/num_workers，RL/GRPO/AC的learning_rate、clip_ratio、kl_coef、max_grad_norm、use_gpu、supervision_mode、gamma、entropy_coef、hidden_dim等）可在 `config.json` 的 `training` 下各自子块配置
 
 **参数优先级**：命令行参数 > 配置文件参数 > 默认值
 
@@ -340,6 +356,13 @@ python train.py --config config.json --experiment custom_name --distance 7
     "grpo": {
       "epochs": 100,
       "group_size": 64
+    },
+    "ac": {
+      "epochs": 100,
+      "batch_size": 32,
+      "learning_rate_actor": 1e-4,
+      "learning_rate_critic": 1e-3,
+      "eval_frequency": 10
     }
   }
 }
@@ -360,6 +383,8 @@ python train.py --config config.json --experiment custom_name --distance 7
 3. **RL方法**:
    - RL方法的超参数（学习率、批次大小、训练轮数等）需要根据具体问题调整
    - `grpo`方法相比`rl_based`方法内存效率更高，推荐使用
+   - `actor_critic`方法使用独立的Actor和Critic网络，提供更稳定的梯度估计，适合需要精确价值函数的场景
+   - AC方法使用了性能优化：通过`eval_frequency`参数控制LER评估频率（默认每10轮评估一次），大幅提升训练速度
    - 当前实现为简化版本，可以根据需要进一步优化
 
 4. **配置文件**:
