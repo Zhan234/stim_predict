@@ -50,14 +50,15 @@ def train_predictors(
     ac_max_grad_norm: float = 0.5,
     ac_use_gpu: bool = True,
     ac_eval_frequency: int = 10,
-    ac_action_scale: float = 0.05
+    ac_action_scale: float = 0.05,
     dqn_epochs: int = 50,
     dqn_batch_size: int = 32,
     dqn_lr_actor: float = 1e-3,
     dqn_lr_critic: float = 1e-3,
     dqn_buffer_size: int = 1000,
     dqn_exploration_noise: float = 2.0,
-    dqn_use_gpu: bool = True
+    dqn_use_gpu: bool = True,
+    eval_subset_size: int = 10000
 ):
     """
     训练多个预测方法
@@ -81,40 +82,57 @@ def train_predictors(
     print(f"训练方法: {', '.join(methods)}")
     print("=" * 80)
     
-    # 1. 生成电路
-    print("\n[1/4] 生成电路...")
-    circuit = CircuitFactory.create_circuit(
-        code_type=code_type,
-        distance=distance,
-        rounds=rounds,
-        noise_level=noise_level
-    )
-    print(f"电路生成完成，包含 {circuit.num_detectors} 个探测器")
-    
-    # 2. 采样数据
-    print("\n[2/4] 采样探测器数据...")
-    sampler = circuit.compile_detector_sampler()
-    detector_samples, observables = sampler.sample(shots=n_shots, separate_observables=True)
-    print(f"采样完成，形状: detectors={detector_samples.shape}, observables={observables.shape}")
-    
-    # 3. 保存训练数据
-    print("\n[3/4] 保存训练数据...")
     data_manager = DataManager()
-    metadata = {
-        'code_type': code_type,
-        'distance': distance,
-        'rounds': rounds,
-        'noise_level': noise_level,
-        'n_shots': n_shots
-    }
-    data_manager.save_training_data(
-        experiment_name=experiment_name,
-        circuit=circuit,
-        detector_samples=detector_samples,
-        observables=observables,
-        metadata=metadata
-    )
-    print(f"训练数据已保存（包含ground truth DEM用于评测）")
+    
+    # 检查是否已存在训练数据（确保同一实验使用相同的电路和采样数据）
+    exp_dir = os.path.join(data_manager.base_dir, experiment_name)
+    samples_path = os.path.join(exp_dir, "samples.npz")
+    
+    if os.path.exists(samples_path):
+        # 加载已有的训练数据
+        print("\n[1/4] 检测到已有训练数据，加载中...")
+        existing_data = data_manager.load_training_data(experiment_name)
+        circuit = existing_data['circuit']
+        detector_samples = existing_data['detector_samples']
+        observables = existing_data['observables']
+        print(f"已加载电路（{circuit.num_detectors} 个探测器）和采样数据")
+        print(f"数据形状: detectors={detector_samples.shape}, observables={observables.shape}")
+        print("\n[2/4] 跳过（使用已有数据）")
+        print("\n[3/4] 跳过（使用已有数据）")
+    else:
+        # 1. 生成电路
+        print("\n[1/4] 生成电路...")
+        circuit = CircuitFactory.create_circuit(
+            code_type=code_type,
+            distance=distance,
+            rounds=rounds,
+            noise_level=noise_level
+        )
+        print(f"电路生成完成，包含 {circuit.num_detectors} 个探测器")
+        
+        # 2. 采样数据
+        print("\n[2/4] 采样探测器数据...")
+        sampler = circuit.compile_detector_sampler()
+        detector_samples, observables = sampler.sample(shots=n_shots, separate_observables=True)
+        print(f"采样完成，形状: detectors={detector_samples.shape}, observables={observables.shape}")
+        
+        # 3. 保存训练数据
+        print("\n[3/4] 保存训练数据...")
+        metadata = {
+            'code_type': code_type,
+            'distance': distance,
+            'rounds': rounds,
+            'noise_level': noise_level,
+            'n_shots': n_shots
+        }
+        data_manager.save_training_data(
+            experiment_name=experiment_name,
+            circuit=circuit,
+            detector_samples=detector_samples,
+            observables=observables,
+            metadata=metadata
+        )
+        print(f"训练数据已保存（包含ground truth DEM用于评测）")
     
     # 4. 训练各个方法
     print("\n[4/4] 训练预测方法...")
@@ -148,7 +166,9 @@ def train_predictors(
                     entropy_coef=rl_entropy_coef,
                     value_coef=rl_value_coef,
                     max_grad_norm=rl_max_grad_norm,
-                    use_gpu=rl_use_gpu
+                    use_gpu=rl_use_gpu,
+                    num_workers=num_workers,
+                    eval_subset_size=eval_subset_size
                 )
                 result = predictor.train(
                     circuit, 
@@ -168,7 +188,9 @@ def train_predictors(
                     kl_coef=grpo_kl_coef,
                     max_grad_norm=grpo_max_grad_norm,
                     supervision_mode=grpo_supervision_mode,
-                    use_gpu=grpo_use_gpu
+                    use_gpu=grpo_use_gpu,
+                    num_workers=num_workers,
+                    eval_subset_size=eval_subset_size
                 )
                 result = predictor.train(
                     circuit, 
@@ -195,6 +217,13 @@ def train_predictors(
                 )
                 result = predictor.train(
                     circuit, 
+                    detector_samples,
+                    observables=observables
+                )
+                print(f"训练完成，共 {len(result['hyperedge_probs'])} 个超边")
+                print(f"最终平均奖励: {result['final_mean_reward']:.3f}")
+                print(f"最终平均LER: {result['final_mean_ler']:.6f}")
+                
             elif method_name == 'dqn':
                 predictor = DQNPredictor(
                     epochs=dqn_epochs,
@@ -279,6 +308,7 @@ def merge_config_and_args(config: Optional[Dict[str, Any]], args: argparse.Names
         params['noise_level'] = config.get('circuit', {}).get('noise_level', 0.001)
         params['n_shots'] = config.get('sampling', {}).get('n_shots', 100000)
         params['num_workers'] = config.get('training', {}).get('num_workers', 8)
+        params['eval_subset_size'] = config.get('training', {}).get('eval_subset_size', 10000)
         params['methods'] = config.get('training', {}).get('methods', ['correlation'])
         params['correlation_use_numerical'] = config.get('training', {}).get('correlation', {}).get('use_numerical', True)
         params['correlation_num_workers'] = config.get('training', {}).get('correlation', {}).get('num_workers', None)
@@ -310,6 +340,15 @@ def merge_config_and_args(config: Optional[Dict[str, Any]], args: argparse.Names
         params['ac_use_gpu'] = config.get('training', {}).get('ac', {}).get('use_gpu', True)
         params['ac_eval_frequency'] = config.get('training', {}).get('ac', {}).get('eval_frequency', 10)
         params['ac_action_scale'] = config.get('training', {}).get('ac', {}).get('action_scale', 0.05)
+        # DQN 相关参数（如果配置文件未提供，则在后面调用 train_predictors 时再使用默认值兜底）
+        dqn_cfg = config.get('training', {}).get('dqn', {})
+        params['dqn_epochs'] = dqn_cfg.get('epochs', 50)
+        params['dqn_batch_size'] = dqn_cfg.get('batch_size', 32)
+        params['dqn_lr_actor'] = dqn_cfg.get('learning_rate_actor', 1e-3)
+        params['dqn_lr_critic'] = dqn_cfg.get('learning_rate_critic', 1e-3)
+        params['dqn_buffer_size'] = dqn_cfg.get('buffer_size', 1000)
+        params['dqn_exploration_noise'] = dqn_cfg.get('exploration_noise', 2.0)
+        params['dqn_use_gpu'] = dqn_cfg.get('use_gpu', True)
     else:
         # 使用默认值
         params['experiment_name'] = ''
@@ -319,6 +358,7 @@ def merge_config_and_args(config: Optional[Dict[str, Any]], args: argparse.Names
         params['noise_level'] = 0.001
         params['n_shots'] = 100000
         params['num_workers'] = 8
+        params['eval_subset_size'] = 10000
         params['methods'] = ['correlation']
         params['correlation_use_numerical'] = True
         params['correlation_num_workers'] = None
@@ -577,14 +617,15 @@ def main():
         ac_max_grad_norm=params['ac_max_grad_norm'],
         ac_use_gpu=params['ac_use_gpu'],
         ac_eval_frequency=params['ac_eval_frequency'],
-        ac_action_scale=params['ac_action_scale']
+        ac_action_scale=params['ac_action_scale'],
         dqn_epochs=params.get('dqn_epochs', 200),
         dqn_batch_size=params.get('dqn_batch_size', 32),
         dqn_lr_actor=params.get('dqn_lr_actor', 1e-3),
         dqn_lr_critic=params.get('dqn_lr_critic', 1e-3),
         dqn_buffer_size=params.get('dqn_buffer_size', 1000),
         dqn_exploration_noise=params.get('dqn_exploration_noise', 2.0),
-        dqn_use_gpu=params.get('dqn_use_gpu', True)
+        dqn_use_gpu=params.get('dqn_use_gpu', True),
+        eval_subset_size=params['eval_subset_size']
     )
 
 

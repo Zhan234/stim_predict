@@ -7,6 +7,7 @@ import torch.nn as nn
 from typing import Dict, Tuple, Any, List, Optional
 import correlation
 from copy import deepcopy
+from concurrent.futures import ThreadPoolExecutor
 
 from .base import BasePredictor
 
@@ -33,7 +34,9 @@ class RLBasedPredictor(BasePredictor):
                  entropy_coef: float = 0.01,
                  value_coef: float = 0.5,
                  max_grad_norm: float = 0.5,
-                 use_gpu: bool = True):
+                 use_gpu: bool = True,
+                 num_workers: int = 8,
+                 eval_subset_size: int = 10000):
         """
         初始化RL预测器
         
@@ -46,6 +49,8 @@ class RLBasedPredictor(BasePredictor):
             value_coef: 价值函数损失系数
             max_grad_norm: 梯度裁剪的最大范数
             use_gpu: 是否使用GPU
+            num_workers: 并行解码的工作线程数
+            eval_subset_size: 每次评估使用的样本子集大小（0表示使用全部）
         """
         super().__init__(name="rl_based")
         
@@ -58,6 +63,8 @@ class RLBasedPredictor(BasePredictor):
         self.value_coef = value_coef
         self.max_grad_norm = max_grad_norm
         self.use_gpu = use_gpu and torch.cuda.is_available()
+        self.num_workers = num_workers
+        self.eval_subset_size = eval_subset_size
         
         # 设备设置
         self.device = torch.device('cuda' if self.use_gpu else 'cpu')
@@ -150,6 +157,7 @@ class RLBasedPredictor(BasePredictor):
         )
         
         print(f"开始RL训练，共 {self.epochs} 轮，批次大小 {self.batch_size}")
+        print(f"并行工作线程: {self.num_workers}, 评估样本子集大小: {self.eval_subset_size if self.eval_subset_size > 0 else '全部'}")
         
         # PPO训练循环
         for epoch in range(self.epochs):
@@ -157,31 +165,13 @@ class RLBasedPredictor(BasePredictor):
             log_probs_samples, probs_samples = self._sample_policy(self.batch_size)
             probs_samples_np = probs_samples.cpu().numpy()  # 转回numpy用于后续处理
             
-            # 2. 评估每个候选的LER（reward）
-            rewards = []
-            lers = []
-            
-            for i in range(self.batch_size):
-                hyperedge_probs_candidate = {}
-                for j, hyperedge in enumerate(self.tanner_graph.hyperedge_probs.keys()):
-                    hyperedge_probs_candidate[hyperedge] = probs_samples_np[i, j]
-                
-                # 构建候选DEM
-                candidate_dem = self._build_dem_from_hyperedge_probs(hyperedge_probs_candidate)
-                
-                # 计算LER
-                ler = self._evaluate_ler(
-                    candidate_dem,
-                    detector_samples,
-                    observables,
-                    decoder_type
-                )
-                
-                # 计算reward: -log10(LER)
-                reward = -np.log10(max(ler, 1e-10))
-                
-                rewards.append(reward)
-                lers.append(ler)
+            # 2. 并行评估每个候选的LER（reward）
+            rewards, lers = self._evaluate_batch_parallel(
+                probs_samples_np,
+                detector_samples,
+                observables,
+                decoder_type
+            )
             
             rewards = np.array(rewards)
             lers = np.array(lers)
@@ -271,6 +261,51 @@ class RLBasedPredictor(BasePredictor):
         probs_samples = torch.clamp(torch.exp(log_probs_samples), min=1e-10, max=1.0)
         
         return log_probs_samples, probs_samples
+    
+    def _evaluate_batch_parallel(self,
+                                  probs_batch: np.ndarray,
+                                  detector_samples: np.ndarray,
+                                  observables: Optional[np.ndarray],
+                                  decoder_type: str) -> Tuple[List[float], List[float]]:
+        """
+        并行评估一批候选参数的LER
+        
+        Args:
+            probs_batch: 概率参数批次，形状 (batch_size, n_params)
+            detector_samples: 探测器采样数据
+            observables: 观测量数据
+            decoder_type: 解码器类型
+            
+        Returns:
+            (rewards, lers): 奖励列表和LER列表
+        """
+        # 子采样以加速评估
+        if self.eval_subset_size > 0 and len(detector_samples) > self.eval_subset_size:
+            indices = np.random.choice(len(detector_samples), self.eval_subset_size, replace=False)
+            eval_samples = detector_samples[indices]
+            eval_observables = observables[indices] if observables is not None else None
+        else:
+            eval_samples = detector_samples
+            eval_observables = observables
+        
+        hyperedge_keys = list(self.tanner_graph.hyperedge_probs.keys())
+        
+        def eval_single(probs: np.ndarray) -> Tuple[float, float]:
+            """评估单个候选"""
+            hyperedge_probs = {h: probs[j] for j, h in enumerate(hyperedge_keys)}
+            dem = self._build_dem_from_hyperedge_probs(hyperedge_probs)
+            ler = self._evaluate_ler(dem, eval_samples, eval_observables, decoder_type)
+            reward = -np.log10(max(ler, 1e-10))
+            return reward, ler
+        
+        # 并行执行
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            results = list(executor.map(eval_single, probs_batch))
+        
+        rewards = [r[0] for r in results]
+        lers = [r[1] for r in results]
+        
+        return rewards, lers
     
     def _build_dem_from_hyperedge_probs(self, hyperedge_probs: Dict[Tuple, float]) -> stim.DetectorErrorModel:
         """
