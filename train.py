@@ -8,7 +8,7 @@ from typing import List, Optional, Dict, Any
 import stim
 
 from circuits import CircuitFactory
-from methods import CorrelationPredictor, RLBasedPredictor, GRPOPredictor, ACPredictor, DQNPredictor
+from methods import CorrelationPredictor, RLBasedPredictor, GRPOPredictor, ACPredictor, DQNPredictor, ResidualRLPredictor
 from utils import DataManager
 
 
@@ -58,7 +58,15 @@ def train_predictors(
     dqn_buffer_size: int = 1000,
     dqn_exploration_noise: float = 2.0,
     dqn_use_gpu: bool = True,
-    eval_subset_size: int = 10000
+    eval_subset_size: int = 10000,
+    res_alpha: float = 1.0,
+    res_population_size: int = 20,
+    res_top_k: int = 30,
+    res_epochs: int = 50,
+    res_sigma: float = 0.3,
+    res_learning_rate: float = 0.1,
+    res_use_gpu: bool = True,
+    res_eval_frequency: int = 5
 ):
     """
     训练多个预测方法
@@ -243,6 +251,31 @@ def train_predictors(
                 print(f"最终平均奖励: {result['final_mean_reward']:.3f}")
                 print(f"最终平均LER: {result['final_mean_ler']:.6f}")
                 
+            elif method_name == 'res' or method_name == 'residual_rl' or method_name == 'residual_es':
+                predictor = ResidualRLPredictor(
+                    alpha=res_alpha,
+                    population_size=res_population_size,
+                    top_k=res_top_k,
+                    epochs=res_epochs,
+                    sigma=res_sigma,
+                    learning_rate=res_learning_rate,
+                    use_gpu=res_use_gpu,
+                    correlation_use_numerical=correlation_use_numerical,
+                    correlation_num_workers=correlation_num_workers or num_workers,
+                    eval_frequency=res_eval_frequency,
+                    num_workers=num_workers,
+                    eval_subset_size=eval_subset_size
+                )
+                result = predictor.train(
+                    circuit,
+                    detector_samples,
+                    observables=observables
+                )
+                print(f"训练完成，共 {len(result['hyperedge_probs'])} 个超边")
+                print(f"Baseline LER: {result['baseline_ler']:.6f}")
+                print(f"最终LER: {result['final_mean_ler']:.6f}")
+                print(f"相对改进: {result['improvement_percent']:.2f}%")
+                
             else:
                 print(f"警告: 未知的方法 '{method_name}'，跳过")
                 continue
@@ -349,6 +382,16 @@ def merge_config_and_args(config: Optional[Dict[str, Any]], args: argparse.Names
         params['dqn_buffer_size'] = dqn_cfg.get('buffer_size', 1000)
         params['dqn_exploration_noise'] = dqn_cfg.get('exploration_noise', 2.0)
         params['dqn_use_gpu'] = dqn_cfg.get('use_gpu', True)
+        # Residual ES 相关参数
+        res_cfg = config.get('training', {}).get('res', {})
+        params['res_alpha'] = res_cfg.get('alpha', 1.0)
+        params['res_population_size'] = res_cfg.get('population_size', 20)
+        params['res_top_k'] = res_cfg.get('top_k', 30)
+        params['res_epochs'] = res_cfg.get('epochs', 50)
+        params['res_sigma'] = res_cfg.get('sigma', 0.3)
+        params['res_learning_rate'] = res_cfg.get('learning_rate', 0.1)
+        params['res_use_gpu'] = res_cfg.get('use_gpu', True)
+        params['res_eval_frequency'] = res_cfg.get('eval_frequency', 5)
     else:
         # 使用默认值
         params['experiment_name'] = ''
@@ -390,6 +433,14 @@ def merge_config_and_args(config: Optional[Dict[str, Any]], args: argparse.Names
         params['ac_use_gpu'] = True
         params['ac_eval_frequency'] = 10
         params['ac_action_scale'] = 0.05
+        params['res_alpha'] = 1.0
+        params['res_population_size'] = 20
+        params['res_top_k'] = 30
+        params['res_epochs'] = 50
+        params['res_sigma'] = 0.3
+        params['res_learning_rate'] = 0.1
+        params['res_use_gpu'] = True
+        params['res_eval_frequency'] = 5
     
     # 命令行参数覆盖配置文件（优先级更高）
     if args.experiment is not None:
@@ -470,6 +521,22 @@ def merge_config_and_args(config: Optional[Dict[str, Any]], args: argparse.Names
         params['ac_eval_frequency'] = args.ac_eval_frequency
     if getattr(args, 'ac_action_scale', None) is not None:
         params['ac_action_scale'] = args.ac_action_scale
+    if getattr(args, 'res_alpha', None) is not None:
+        params['res_alpha'] = args.res_alpha
+    if getattr(args, 'res_epochs', None) is not None:
+        params['res_epochs'] = args.res_epochs
+    if getattr(args, 'res_batch_size', None) is not None:
+        params['res_batch_size'] = args.res_batch_size
+    if getattr(args, 'res_learning_rate', None) is not None:
+        params['res_learning_rate'] = args.res_learning_rate
+    if getattr(args, 'res_hidden_dim', None) is not None:
+        params['res_hidden_dim'] = args.res_hidden_dim
+    if getattr(args, 'res_use_gpu', None):
+        params['res_use_gpu'] = True
+    if getattr(args, 'res_no_gpu', None):
+        params['res_use_gpu'] = False
+    if getattr(args, 'res_eval_frequency', None) is not None:
+        params['res_eval_frequency'] = args.res_eval_frequency
     
     return params
 
@@ -517,6 +584,22 @@ def main():
                        help='Actor-Critic方法的训练轮数（覆盖配置文件）')
     parser.add_argument('--ac-batch-size', type=int, default=None,
                        help='Actor-Critic方法的批次大小（覆盖配置文件）')
+    parser.add_argument('--res-alpha', type=float, default=None,
+                       help='Residual RL的调整范围参数（覆盖配置文件）')
+    parser.add_argument('--res-epochs', type=int, default=None,
+                       help='Residual RL的训练轮数（覆盖配置文件）')
+    parser.add_argument('--res-batch-size', type=int, default=None,
+                       help='Residual RL的批次大小（覆盖配置文件）')
+    parser.add_argument('--res-learning-rate', type=float, default=None,
+                       help='Residual RL的学习率（覆盖配置文件）')
+    parser.add_argument('--res-hidden-dim', type=int, default=None,
+                       help='Residual RL的隐藏层维度（覆盖配置文件）')
+    parser.add_argument('--res-use-gpu', action='store_true',
+                       help='Residual RL强制使用GPU（覆盖配置文件）')
+    parser.add_argument('--res-no-gpu', action='store_true',
+                       help='Residual RL强制不使用GPU（覆盖配置文件）')
+    parser.add_argument('--res-eval-frequency', type=int, default=None,
+                       help='Residual RL的评估频率（覆盖配置文件）')
     
     args = parser.parse_args()
     
@@ -578,6 +661,15 @@ def main():
         print(f"  AC使用GPU: {params['ac_use_gpu']}")
         print(f"  AC评估频率: 每{params['ac_eval_frequency']}轮")
         print(f"  AC动作缩放: {params['ac_action_scale']}")
+    if 'res' in params['methods'] or 'residual_rl' in params['methods'] or 'residual_es' in params['methods']:
+        print(f"  Residual ES调整范围α: {params['res_alpha']}")
+        print(f"  Residual ES种群大小: {params['res_population_size']}")
+        print(f"  Residual ES top-K: {params['res_top_k']}")
+        print(f"  Residual ES训练轮数: {params['res_epochs']}")
+        print(f"  Residual ES噪声σ: {params['res_sigma']}")
+        print(f"  Residual ES学习率: {params['res_learning_rate']}")
+        print(f"  Residual ES使用GPU: {params['res_use_gpu']}")
+        print(f"  Residual ES评估频率: 每{params['res_eval_frequency']}轮")
     print()
     
     train_predictors(
@@ -625,7 +717,15 @@ def main():
         dqn_buffer_size=params.get('dqn_buffer_size', 1000),
         dqn_exploration_noise=params.get('dqn_exploration_noise', 2.0),
         dqn_use_gpu=params.get('dqn_use_gpu', True),
-        eval_subset_size=params['eval_subset_size']
+        eval_subset_size=params['eval_subset_size'],
+        res_alpha=params.get('res_alpha', 1.0),
+        res_population_size=params.get('res_population_size', 20),
+        res_top_k=params.get('res_top_k', 30),
+        res_epochs=params.get('res_epochs', 50),
+        res_sigma=params.get('res_sigma', 0.3),
+        res_learning_rate=params.get('res_learning_rate', 0.1),
+        res_use_gpu=params.get('res_use_gpu', True),
+        res_eval_frequency=params.get('res_eval_frequency', 5)
     )
 
 

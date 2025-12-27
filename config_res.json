@@ -1,0 +1,82 @@
+{
+    "experiment_name": "res_test2",
+    "circuit": {
+        "code_type": "surface_code",
+        "distance": 5,
+        "rounds": 5,
+        "noise_level": 0.01
+    },
+    "sampling": {
+        "n_shots": 100000
+    },
+    "training": {
+        "num_workers": 8,
+        "methods": [
+            "correlation",
+            "res"
+        ],
+        "correlation": {
+            "use_numerical": true,
+            "num_workers": 16
+        },
+        "rl_based": {
+            "learning_rate": 0.001,
+            "epochs": 20,
+            "batch_size": 16,
+            "clip_ratio": 0.2,
+            "entropy_coef": 0.01,
+            "value_coef": 0.5,
+            "max_grad_norm": 0.5,
+            "use_gpu": false
+        },
+        "ac": {
+            "epochs": 100,
+            "batch_size": 32,
+            "learning_rate_actor": 0.0001,
+            "learning_rate_critic": 0.001,
+            "hidden_dim": 128,
+            "gamma": 0.99,
+            "entropy_coef": 0.01,
+            "max_grad_norm": 0.5,
+            "use_gpu": true,
+            "eval_frequency": 10,
+            "action_scale": 0.01
+        },
+        "grpo": {
+            "learning_rate": 1e-6,
+            "epochs": 20,
+            "group_size": 16,
+            "clip_ratio": 0.2,
+            "kl_coef": 0.04,
+            "max_grad_norm": 0.5,
+            "supervision_mode": "outcome",
+            "use_gpu": false
+        },
+        "res": {
+            "alpha": 1.0,
+            "population_size": 20,
+            "top_k": 30,
+            "epochs": 50,
+            "sigma": 0.3,
+            "learning_rate": 0.1,
+            "use_gpu": true,
+            "eval_frequency": 5
+        }
+    },
+    "evaluation": {
+        "ground_truth": "dem",
+        "evaluators": [
+            "distribution_distance",
+            "decoder_ler"
+        ],
+        "decoders": [
+            "pymatching",
+            "pymatching_corr"
+        ],
+        "test_shots": 100000,
+        "methods": [
+            "correlation",
+            "res"
+        ]
+    }
+}
