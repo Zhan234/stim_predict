@@ -6,6 +6,7 @@ from .rl_based import RLBasedPredictor
 from .grpo import GRPOPredictor
 from .ac import ACPredictor
 from .dqn import DQNPredictor
+from .res import ResidualRLPredictor
 
 __all__ = [
     'BasePredictor',
@@ -14,4 +15,5 @@ __all__ = [
     'GRPOPredictor',
     'ACPredictor',
     'DQNPredictor',
+    'ResidualRLPredictor',
 ]
