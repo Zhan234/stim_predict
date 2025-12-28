@@ -1,25 +1,25 @@
 {
-  "experiment_name": "zxy_exp_3",
+  "experiment_name": "rep_code_21_2",
   "circuit": {
-    "code_type": "surface_code",
-    "distance": 5,
-    "rounds": 5,
-    "noise_level": 0.008
+    "code_type": "repetition_code",
+    "distance": 21,
+    "rounds": 21,
+    "noise_level": 0.01
   },
   "sampling": {
-    "n_shots": 100000
+    "n_shots": 500000
   },
   "training": {
-    "num_workers": 16,
-    "eval_subset_size": 20000,
-    "methods": ["correlation", "rl_based", "grpo"],
+    "num_workers": 4,
+    "eval_subset_size": 100000,
+    "methods": ["correlation", "rl_based", "res"],
     "correlation": {
-      "use_numerical": true
+      "use_numerical": false
     },
     "rl_based": {
       "learning_rate": 0.0001,
-      "epochs": 50,
-      "batch_size": 32,
+      "epochs": 30,
+      "batch_size": 16,
       "clip_ratio": 0.2,
       "entropy_coef": 0.01,
       "value_coef": 0.5,
@@ -57,14 +57,24 @@
       "buffer_size": 1000,
       "exploration_noise": 2.0,
       "use_gpu": true
+    },
+    "res": {
+      "alpha": 1.0,
+      "population_size": 20,
+      "top_k": 30,
+      "epochs": 50,
+      "sigma": 0.3,
+      "learning_rate": 0.05,
+      "use_gpu": true,
+      "eval_frequency": 5
     }
   },
   "evaluation": {
     "ground_truth": "dem",
     "evaluators": ["decoder_ler"],
     "decoders": ["pymatching", "pymatching_corr"],
-    "test_shots": 100000,
-    "methods": ["correlation", "rl_based", "grpo"]
+    "test_shots": 1000000,
+    "methods": ["correlation", "rl_based", "res"]
   }
 }
 

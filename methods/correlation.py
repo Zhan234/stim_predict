@@ -26,6 +26,8 @@ class CorrelationPredictor(BasePredictor):
         # 获取DEM
         decompose = kwargs.get('decompose_errors', True)
         dem = circuit.detector_error_model(decompose_errors=decompose)
+        # 默认的 fallback 概率：不要回退到 ground-truth DEM 的概率，使用一个很小的默认值
+        default_fallback_prob = float(kwargs.get('default_fallback_prob', 1e-6))
         
         if self.use_numerical:
             # 数值方法：使用高阶相关性分析
@@ -42,16 +44,34 @@ class CorrelationPredictor(BasePredictor):
             hyperedge_probs = {}
             for hyperedge, prob_dem in self.tanner_graph.hyperedge_probs.items():
                 prob_corr = result.get(hyperedge)
-                # 使用相关性计算的概率，如果无效则使用DEM的概率
+                # 使用相关性计算的概率；如果无效则使用小的默认概率（不要泄露 DEM 的真实概率）
                 if prob_corr is not None and prob_corr > 0:
                     hyperedge_probs[hyperedge] = prob_corr
                 else:
-                    hyperedge_probs[hyperedge] = prob_dem
+                    hyperedge_probs[hyperedge] = default_fallback_prob
         
         else:
             # 解析方法：使用二阶相关性（仅适用于简单码如重复码）
             result = correlation.cal_2nd_order_correlations(detector_samples)
             bdy, edges = result.data
+            # 规范 bdy/edges：如果是数组，取均值作为代表性的标量值；如果是 dict，则保留原样用于按超边索引查找
+            def _to_scalar_or_dict(x):
+                if x is None:
+                    return None
+                if isinstance(x, dict):
+                    return x
+                try:
+                    arr = np.asarray(x)
+                except Exception:
+                    return x
+                if arr.size == 1:
+                    return float(arr.item())
+                # 多元素数组 -> 使用均值作为回退的标量估计
+                return float(np.mean(arr))
+
+            bdy_val = _to_scalar_or_dict(bdy)
+            edges_val = _to_scalar_or_dict(edges)
+            # 不再使用 ground-truth DEM 给出的理想相关性作为直接回退值
             bdy_ideal, edges_ideal = correlation.correlation_from_detector_error_model(dem)
             self.tanner_graph = correlation.TannerGraph(dem)
             hyperedge_probs = {}
@@ -62,35 +82,37 @@ class CorrelationPredictor(BasePredictor):
                 hyperedge_order = len(hyperedge)
                 
                 if hyperedge_order == 1:
-                    if bdy is not None and bdy > 0:
-                        hyperedge_probs[hyperedge] = bdy
+                    if bdy_val is not None and isinstance(bdy_val, (float, int)) and bdy_val > 0:
+                        hyperedge_probs[hyperedge] = bdy_val
                     else:
-                        hyperedge_probs[hyperedge] = prob_dem
+                        hyperedge_probs[hyperedge] = default_fallback_prob
                 
                 elif hyperedge_order == 2:
                     if edges is not None:
                         # 如果edges是字典，尝试查找对应的边
-                        if isinstance(edges, dict) and hyperedge in edges:
-                            prob_corr = edges[hyperedge]
-                            if prob_corr > 0:
+                        if isinstance(edges_val, dict) and hyperedge in edges_val:
+                            prob_corr = edges_val[hyperedge]
+                            if prob_corr is not None and prob_corr > 0:
                                 hyperedge_probs[hyperedge] = prob_corr
                             else:
-                                hyperedge_probs[hyperedge] = prob_dem
-                        # 如果edges是单个值（适用于重复码的均匀情况）
-                        elif isinstance(edges, (float, np.floating)) and edges > 0:
-                            hyperedge_probs[hyperedge] = edges
+                                hyperedge_probs[hyperedge] = default_fallback_prob
+                        # 如果edges是单个标量值（适用于重复码的均匀情况）
+                        elif isinstance(edges_val, (float, int)) and edges_val > 0:
+                            hyperedge_probs[hyperedge] = edges_val
                         else:
-                            hyperedge_probs[hyperedge] = prob_dem
+                            hyperedge_probs[hyperedge] = default_fallback_prob
                     else:
-                        hyperedge_probs[hyperedge] = prob_dem
+                        hyperedge_probs[hyperedge] = default_fallback_prob
                 
                 else:
-                    hyperedge_probs[hyperedge] = prob_dem
+                    hyperedge_probs[hyperedge] = default_fallback_prob
             
             # 保存相关性信息用于调试
             self._correlation_info = {
                 'bdy_calculated': bdy,
                 'edges_calculated': edges,
+                'bdy_used': bdy_val,
+                'edges_used': edges_val,
                 'bdy_ideal': bdy_ideal,
                 'edges_ideal': edges_ideal
             }
