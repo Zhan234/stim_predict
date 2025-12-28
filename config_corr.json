@@ -1,5 +1,5 @@
 {
-  "experiment_name": "rep_code_15_3",
+  "experiment_name": "corr_only",
   "circuit": {
     "code_type": "repetition_code",
     "distance": 15,
@@ -10,9 +10,9 @@
     "n_shots": 100000
   },
   "training": {
-    "num_workers": 16,
+    "num_workers": 8,
     "eval_subset_size": 50000,
-    "methods": ["correlation", "rl_based", "res"],
+    "methods": ["correlation"],
     "correlation": {
       "use_numerical": false
     },
@@ -74,7 +74,7 @@
     "evaluators": ["decoder_ler"],
     "decoders": ["pymatching", "pymatching_corr"],
     "test_shots": 100000,
-    "methods": ["correlation", "rl_based", "res"]
+    "methods": ["correlation"]
   }
 }
 

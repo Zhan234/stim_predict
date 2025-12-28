@@ -62,65 +62,52 @@ class CorrelationPredictor(BasePredictor):
             # 解析方法：使用二阶相关性（仅适用于简单码如重复码）
             result = correlation.cal_2nd_order_correlations(detector_samples)
             bdy, edges = result.data
-            # 规范 bdy/edges：如果是数组，取均值作为代表性的标量值；如果是 dict，则保留原样用于按超边索引查找
-            def _to_scalar_or_dict(x):
-                if x is None:
-                    return None
-                if isinstance(x, dict):
-                    return x
-                try:
-                    arr = np.asarray(x)
-                except Exception:
-                    return x
-                if arr.size == 1:
-                    return float(arr.item())
-                # 多元素数组 -> 使用均值作为回退的标量估计
-                return float(np.mean(arr))
 
-            bdy_val = _to_scalar_or_dict(bdy)
-            edges_val = _to_scalar_or_dict(edges)
+            print("相关性分析结果:")
+            print(f"边界相关性形状: {np.array(bdy).shape}")
+            print(f"边相关性形状: {np.array(edges).shape}")
+
             # 不再使用 ground-truth DEM 给出的理想相关性作为直接回退值
             bdy_ideal, edges_ideal = correlation.correlation_from_detector_error_model(dem)
             self.tanner_graph = correlation.TannerGraph(dem)
             hyperedge_probs = {}
-            
+
             # 使用计算得到的相关性来调整DEM中的概率
             for hyperedge, prob_dem in self.tanner_graph.hyperedge_probs.items():
-                # 根据超边的阶数选择使用哪个相关性
                 hyperedge_order = len(hyperedge)
-                
+
                 if hyperedge_order == 1:
-                    if bdy_val is not None and isinstance(bdy_val, (float, int)) and bdy_val > 0:
-                        hyperedge_probs[hyperedge] = bdy_val
+                    # 单检测器错误：使用边界相关性
+                    detector_idx = list(hyperedge)[0]
+                    if hasattr(bdy, '__len__') and len(bdy) > detector_idx:
+                        prob = bdy[detector_idx]
                     else:
-                        hyperedge_probs[hyperedge] = default_fallback_prob
-                
+                        prob = default_fallback_prob
+
                 elif hyperedge_order == 2:
-                    if edges is not None:
-                        # 如果edges是字典，尝试查找对应的边
-                        if isinstance(edges_val, dict) and hyperedge in edges_val:
-                            prob_corr = edges_val[hyperedge]
-                            if prob_corr is not None and prob_corr > 0:
-                                hyperedge_probs[hyperedge] = prob_corr
-                            else:
-                                hyperedge_probs[hyperedge] = default_fallback_prob
-                        # 如果edges是单个标量值（适用于重复码的均匀情况）
-                        elif isinstance(edges_val, (float, int)) and edges_val > 0:
-                            hyperedge_probs[hyperedge] = edges_val
+                    # 双检测器错误：使用边相关性
+                    detector_indices = list(hyperedge)
+                    if len(detector_indices) == 2:
+                        i, j = detector_indices
+                        if hasattr(edges, 'shape') and edges.shape[0] > i and edges.shape[1] > j:
+                            prob = edges[i, j]
                         else:
-                            hyperedge_probs[hyperedge] = default_fallback_prob
+                            prob = default_fallback_prob
                     else:
-                        hyperedge_probs[hyperedge] = default_fallback_prob
-                
+                        prob = default_fallback_prob
+
                 else:
-                    hyperedge_probs[hyperedge] = default_fallback_prob
+                    # 高阶错误：使用小的默认概率
+                    prob = default_fallback_prob
+
+                # 确保概率在合理范围内
+                prob = np.clip(prob, 1e-10, 1.0)
+                hyperedge_probs[hyperedge] = prob
             
             # 保存相关性信息用于调试
             self._correlation_info = {
                 'bdy_calculated': bdy,
                 'edges_calculated': edges,
-                'bdy_used': bdy_val,
-                'edges_used': edges_val,
                 'bdy_ideal': bdy_ideal,
                 'edges_ideal': edges_ideal
             }

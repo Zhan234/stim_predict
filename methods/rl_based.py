@@ -8,8 +8,10 @@ from typing import Dict, Tuple, Any, List, Optional
 import correlation
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor
+import os
 
 from .base import BasePredictor
+from .correlation import CorrelationPredictor
 
 
 class RLBasedPredictor(BasePredictor):
@@ -36,10 +38,12 @@ class RLBasedPredictor(BasePredictor):
                  max_grad_norm: float = 0.5,
                  use_gpu: bool = True,
                  num_workers: int = 8,
-                 eval_subset_size: int = 10000):
+                 eval_subset_size: int = 10000,
+                 correlation_use_numerical: bool = True,
+                 correlation_num_workers: int = 16):
         """
         初始化RL预测器
-        
+
         Args:
             learning_rate: 学习率
             batch_size: 批次大小
@@ -51,6 +55,8 @@ class RLBasedPredictor(BasePredictor):
             use_gpu: 是否使用GPU
             num_workers: 并行解码的工作线程数
             eval_subset_size: 每次评估使用的样本子集大小（0表示使用全部）
+            correlation_use_numerical: Correlation方法是否使用数值方法
+            correlation_num_workers: Correlation方法的并行线程数
         """
         super().__init__(name="rl_based")
         
@@ -65,6 +71,8 @@ class RLBasedPredictor(BasePredictor):
         self.use_gpu = use_gpu and torch.cuda.is_available()
         self.num_workers = num_workers
         self.eval_subset_size = eval_subset_size
+        self.correlation_use_numerical = correlation_use_numerical
+        self.correlation_num_workers = correlation_num_workers
         
         # 设备设置
         self.device = torch.device('cuda' if self.use_gpu else 'cpu')
@@ -76,16 +84,20 @@ class RLBasedPredictor(BasePredictor):
         # 策略参数（使用PyTorch张量）
         self.policy_mean = None
         self.policy_std = None
-        
+
         # 旧策略参数（用于计算importance ratio，PPO算法核心）
         self.old_policy_mean = None
         self.old_policy_std = None
-        
+
         # Baseline（对应论文中的ba，每个agent的baseline）
         self.baseline = None
-        
+
         # Tanner图
         self.tanner_graph = None
+
+        # Correlation基线
+        self.correlation_predictor = None
+        self.baseline_probs = None
         
         # 训练历史
         self.training_history = {
@@ -111,19 +123,76 @@ class RLBasedPredictor(BasePredictor):
         """
         observables = kwargs.get('observables', None)
         decoder_type = kwargs.get('decoder_type', 'pymatching')
-        
-        # 获取原始DEM和Tanner图
-        dem_origin = circuit.detector_error_model(
-            decompose_errors=True,
-            approximate_disjoint_errors=True
-        )
-        self.tanner_graph = correlation.TannerGraph(dem_origin)
-        
+        experiment_name = kwargs.get('experiment_name', None)
+
+        print("=" * 80)
+        print("步骤 1/2: 使用Correlation方法获取基线概率")
+        print("=" * 80)
+
+        # 获取correlation结果作为初始化
+        correlation_loaded = False
+        if experiment_name:
+            try:
+                # 尝试导入DataManager
+                from ..utils.data_manager import DataManager
+            except ImportError:
+                import sys
+                import os
+                sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                from utils.data_manager import DataManager
+
+            data_manager = DataManager()
+            corr_pred_path = os.path.join(data_manager.base_dir, experiment_name, "predictions", "correlation.pkl")
+            if os.path.exists(corr_pred_path):
+                print(f"发现已有的correlation结果，正在加载: {corr_pred_path}")
+                try:
+                    corr_data = data_manager.load_prediction_results(experiment_name, "correlation")
+                    self.baseline_probs = corr_data['hyperedge_probs']
+                    if 'tanner_graph' in corr_data:
+                        self.tanner_graph = corr_data['tanner_graph']
+                        print("成功加载tanner_graph")
+                        if not hasattr(self.tanner_graph, 'hyperedge_probs') or not self.tanner_graph.hyperedge_probs:
+                            print("警告: 加载的tanner_graph不完整，重新创建...")
+                            dem_origin = circuit.detector_error_model(
+                                decompose_errors=True,
+                                approximate_disjoint_errors=True
+                            )
+                            self.tanner_graph = correlation.TannerGraph(dem_origin)
+                    else:
+                        print("警告: correlation结果中未包含tanner_graph，正在重新创建...")
+                        dem_origin = circuit.detector_error_model(
+                            decompose_errors=True,
+                            approximate_disjoint_errors=True
+                        )
+                        self.tanner_graph = correlation.TannerGraph(dem_origin)
+
+                    correlation_loaded = True
+                    print(f"成功加载correlation结果，共 {len(self.baseline_probs)} 个超边")
+                except Exception as e:
+                    print(f"加载correlation结果失败: {e}，将重新训练")
+                    correlation_loaded = False
+            else:
+                print(f"未找到correlation结果文件: {corr_pred_path}")
+
+        if not correlation_loaded:
+            print("未找到correlation结果，开始训练correlation方法...")
+            # 使用Correlation方法获取基线概率
+            self.correlation_predictor = CorrelationPredictor(
+                use_numerical=self.correlation_use_numerical,
+                num_workers=self.correlation_num_workers
+            )
+
+            corr_result = self.correlation_predictor.train(circuit, detector_samples)
+            self.baseline_probs = corr_result['hyperedge_probs']
+            self.tanner_graph = corr_result['tanner_graph']
+
+        print(f"Correlation完成，{len(self.baseline_probs)} 个超边")
+
         # 初始化策略参数
         n_params = len(self.tanner_graph.hyperedge_probs)
-        
-        # 使用平坦的小概率初始化，避免依赖DEM先验
-        init_probs = np.ones(n_params) * 1e-3
+
+        # 使用correlation结果作为初始化，避免平坦初始化
+        init_probs = np.array([self.baseline_probs[hyperedge] for hyperedge in self.tanner_graph.hyperedge_probs.keys()])
         init_probs = np.clip(init_probs, 1e-10, 0.49)
         
         # 转换为PyTorch张量（需要requires_grad=True以便优化）
@@ -156,8 +225,13 @@ class RLBasedPredictor(BasePredictor):
             lr=self.learning_rate
         )
         
+        print("\n" + "=" * 80)
+        print("步骤 2/2: RL策略优化")
+        print("=" * 80)
+
         print(f"开始RL训练，共 {self.epochs} 轮，批次大小 {self.batch_size}")
         print(f"并行工作线程: {self.num_workers}, 评估样本子集大小: {self.eval_subset_size if self.eval_subset_size > 0 else '全部'}")
+        print(f"初始化概率范围: [{init_probs.min():.2e}, {init_probs.max():.2e}]")
         
         # PPO训练循环
         for epoch in range(self.epochs):
@@ -216,9 +290,11 @@ class RLBasedPredictor(BasePredictor):
         
         return {
             'hyperedge_probs': final_hyperedge_probs,
+            'baseline_probs': self.baseline_probs,
             'training_history': self.training_history,
             'final_mean_reward': self.training_history['rewards'][-1],
-            'final_mean_ler': self.training_history['ler'][-1]
+            'final_mean_ler': self.training_history['ler'][-1],
+            'tanner_graph': self.tanner_graph
         }
     
     def predict(self, circuit: stim.Circuit) -> Dict[Tuple, float]:
