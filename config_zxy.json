@@ -4,13 +4,13 @@
     "code_type": "repetition_code",
     "distance": 21,
     "rounds": 21,
-    "noise_level": 0.01
+    "noise_level": 0.005
   },
   "sampling": {
-    "n_shots": 500000
+    "n_shots": 100000
   },
   "training": {
-    "num_workers": 4,
+    "num_workers": 8,
     "eval_subset_size": 100000,
     "methods": ["correlation", "rl_based", "res"],
     "correlation": {

@@ -23,9 +23,17 @@ class CorrelationPredictor(BasePredictor):
         self.tanner_graph = None
     
     def train(self, circuit: stim.Circuit, detector_samples: np.ndarray, **kwargs) -> Dict:
+        # 调试：检查detector_samples中是否有错误
+        print(f"Detector samples shape: {detector_samples.shape}")
+        print(f"Detector samples dtype: {detector_samples.dtype}")
+        print(f"Detector samples range: [{detector_samples.min()}, {detector_samples.max()}]")
+        print(f"Detector samples non-zero count: {np.count_nonzero(detector_samples)}")
+        print(f"Detector samples error rate: {np.count_nonzero(detector_samples) / detector_samples.size:.2e}")
+
         # 获取DEM
         decompose = kwargs.get('decompose_errors', True)
-        dem = circuit.detector_error_model(decompose_errors=decompose)
+        approximate = kwargs.get('approximate_disjoint_errors', True)
+        dem = circuit.detector_error_model(decompose_errors=decompose, approximate_disjoint_errors=approximate)
         # 默认的 fallback 概率：不要回退到 ground-truth DEM 的概率，使用一个很小的默认值
         default_fallback_prob = float(kwargs.get('default_fallback_prob', 1e-6))
         
@@ -119,10 +127,18 @@ class CorrelationPredictor(BasePredictor):
         
         self.hyperedge_probs = hyperedge_probs
         self.trained = True
-        
+
+        # 添加调试信息
+        print(f"Correlation predictor training completed:")
+        print(f"  - Use numerical: {self.use_numerical}")
+        print(f"  - Number of hyperedges: {len(hyperedge_probs)}")
+        print(f"  - Probability range: [{min(hyperedge_probs.values()):.2e}, {max(hyperedge_probs.values()):.2e}]")
+        print(f"  - Non-zero probabilities: {sum(1 for p in hyperedge_probs.values() if p > 0)}")
+
         return {
             'hyperedge_probs': hyperedge_probs,
-            'tanner_graph': self.tanner_graph
+            'tanner_graph': self.tanner_graph,
+            'correlation_info': self._correlation_info if hasattr(self, '_correlation_info') else None
         }
     
     def predict(self, circuit: stim.Circuit) -> Dict[Tuple, float]:
