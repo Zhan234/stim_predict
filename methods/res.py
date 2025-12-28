@@ -10,9 +10,21 @@ import stim
 import numpy as np
 from typing import Dict, Tuple, Any, List
 import correlation
+import os
 
 from .base import BasePredictor
 from .correlation import CorrelationPredictor
+
+try:
+    # 尝试相对导入
+    from ..utils.data_manager import DataManager
+except ImportError:
+    # 回退到绝对导入
+    import sys
+    import os
+    # 添加项目根目录到路径
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from utils.data_manager import DataManager
 
 
 class ResidualESPredictor(BasePredictor):
@@ -244,21 +256,56 @@ class ResidualESPredictor(BasePredictor):
     def train(self, circuit: stim.Circuit, detector_samples: np.ndarray, **kwargs) -> Dict:
         """使用残差ES训练"""
         observables = kwargs.get('observables', None)
-        
+        experiment_name = kwargs.get('experiment_name', None)
+
         print("=" * 80)
         print("步骤 1/4: 使用Correlation方法获取基线概率")
         print("=" * 80)
-        
-        # Correlation基线
-        self.correlation_predictor = CorrelationPredictor(
-            use_numerical=self.correlation_use_numerical,
-            num_workers=self.correlation_num_workers
-        )
-        
-        corr_result = self.correlation_predictor.train(circuit, detector_samples)
-        self.baseline_probs = corr_result['hyperedge_probs']
-        self.tanner_graph = corr_result['tanner_graph']
-        self.hyperedge_list = sorted(self.baseline_probs.keys())
+
+        # 检查是否已有correlation结果
+        correlation_loaded = False
+        if experiment_name:
+            data_manager = DataManager()
+            corr_pred_path = os.path.join(data_manager.base_dir, experiment_name, "predictions", "correlation.pkl")
+            if os.path.exists(corr_pred_path):
+                print(f"发现已有的correlation结果，正在加载: {corr_pred_path}")
+                try:
+                    corr_data = data_manager.load_prediction_results(experiment_name, "correlation")
+                    self.baseline_probs = corr_data['hyperedge_probs']
+                    # 从correlation数据中重建tanner_graph（如果存在的话）
+                    if 'tanner_graph' in corr_data:
+                        self.tanner_graph = corr_data['tanner_graph']
+                        print("成功加载tanner_graph")
+                        # 验证tanner_graph是否完整
+                        if not hasattr(self.tanner_graph, 'hyperedge_probs') or not self.tanner_graph.hyperedge_probs:
+                            print("警告: 加载的tanner_graph不完整，重新创建...")
+                            self.tanner_graph = correlation.TannerGraph(circuit.detector_error_model())
+                    else:
+                        # 如果没有保存tanner_graph，需要重新创建
+                        print("警告: correlation结果中未包含tanner_graph，正在重新创建...")
+                        self.tanner_graph = correlation.TannerGraph(circuit.detector_error_model())
+
+                    self.hyperedge_list = sorted(self.baseline_probs.keys())
+                    correlation_loaded = True
+                    print(f"成功加载correlation结果，共 {len(self.baseline_probs)} 个超边")
+                except Exception as e:
+                    print(f"加载correlation结果失败: {e}，将重新训练")
+                    correlation_loaded = False
+            else:
+                print(f"未找到correlation结果文件: {corr_pred_path}")
+
+        if not correlation_loaded:
+            print("未找到correlation结果，开始训练correlation方法...")
+            # Correlation基线
+            self.correlation_predictor = CorrelationPredictor(
+                use_numerical=self.correlation_use_numerical,
+                num_workers=self.correlation_num_workers
+            )
+
+            corr_result = self.correlation_predictor.train(circuit, detector_samples)
+            self.baseline_probs = corr_result['hyperedge_probs']
+            self.tanner_graph = corr_result['tanner_graph']
+            self.hyperedge_list = sorted(self.baseline_probs.keys())
         
         print(f"Correlation完成，{len(self.baseline_probs)} 个超边")
         

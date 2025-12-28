@@ -269,7 +269,8 @@ def train_predictors(
                 result = predictor.train(
                     circuit,
                     detector_samples,
-                    observables=observables
+                    observables=observables,
+                    experiment_name=experiment_name
                 )
                 print(f"训练完成，共 {len(result['hyperedge_probs'])} 个超边")
                 print(f"Baseline LER: {result['baseline_ler']:.6f}")

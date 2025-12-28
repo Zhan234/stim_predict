@@ -1,17 +1,17 @@
 {
-  "experiment_name": "rep_code_21_2",
+  "experiment_name": "rep_code_15_2",
   "circuit": {
     "code_type": "repetition_code",
-    "distance": 21,
-    "rounds": 21,
-    "noise_level": 0.005
+    "distance": 15,
+    "rounds": 15,
+    "noise_level": 0.045
   },
   "sampling": {
     "n_shots": 100000
   },
   "training": {
     "num_workers": 8,
-    "eval_subset_size": 100000,
+    "eval_subset_size": 50000,
     "methods": ["correlation", "rl_based", "res"],
     "correlation": {
       "use_numerical": false
@@ -19,7 +19,7 @@
     "rl_based": {
       "learning_rate": 0.0001,
       "epochs": 30,
-      "batch_size": 16,
+      "batch_size": 32,
       "clip_ratio": 0.2,
       "entropy_coef": 0.01,
       "value_coef": 0.5,
@@ -62,7 +62,7 @@
       "alpha": 1.0,
       "population_size": 20,
       "top_k": 30,
-      "epochs": 50,
+      "epochs": 30,
       "sigma": 0.3,
       "learning_rate": 0.05,
       "use_gpu": true,
@@ -73,7 +73,7 @@
     "ground_truth": "dem",
     "evaluators": ["decoder_ler"],
     "decoders": ["pymatching", "pymatching_corr"],
-    "test_shots": 1000000,
+    "test_shots": 100000,
     "methods": ["correlation", "rl_based", "res"]
   }
 }
